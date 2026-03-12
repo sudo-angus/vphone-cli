@@ -28,3 +28,9 @@
 [submodule "vendor/ldid"]
 	path = vendor/ldid
 	url = https://github.com/ProcursusTeam/ldid
+[submodule "vendor/AppleMobileDeviceLibrary"]
+	path = vendor/AppleMobileDeviceLibrary
+	url = https://github.com/Lakr233/AppleMobileDeviceLibrary.git
+[submodule "vendor/AppleMobileDevice"]
+	path = vendor/AppleMobileDevice
+	url = https://github.com/Lakr233/applemobiledevice.git

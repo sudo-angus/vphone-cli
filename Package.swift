@@ -14,6 +14,8 @@ let package = Package(
         .package(path: "vendor/libcapstone-spm"),
         .package(path: "vendor/libimg4-spm"),
         .package(path: "vendor/MachOKit"),
+        .package(path: "vendor/AppleMobileDeviceLibrary"),
+        .package(path: "vendor/AppleMobileDevice"),
         .package(path: "vendor/swift-subprocess"),
         .package(path: "vendor/swift-trustcache"),
     ],
