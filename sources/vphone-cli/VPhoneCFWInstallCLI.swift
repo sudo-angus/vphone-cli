@@ -101,7 +101,6 @@ private struct VPhoneCFWInstaller {
     }
 
     func checkPrerequisites() async throws {
-        _ = try? ensureAskpassHelper()
         var commands = ["ipsw", "aea", "ldid", patcherBinary, "ssh", "scp"]
         if variant == .jb {
             commands += ["zstd", "xcrun"]
@@ -316,7 +315,7 @@ private struct VPhoneCFWInstaller {
                 let result = try await VPhoneHost.runCommand(
                     "ssh",
                     arguments: sshBaseArguments() + [command],
-                    environment: askpassEnvironment(),
+                    environment: VPhoneHost.sshAskpassEnvironment(password: sshPassword, executablePath: patcherBinary),
                     requireSuccess: requireSuccess
                 )
                 if !requireSuccess || result.terminationStatus.isSuccess || VPhoneHost.exitCode(from: result.terminationStatus) != 255 {
@@ -336,12 +335,22 @@ private struct VPhoneCFWInstaller {
             arguments.append("-r")
         }
         arguments += [localPath, "\(sshUser)@\(sshHost):\(remotePath)"]
-        _ = try await VPhoneHost.runCommand("scp", arguments: arguments, environment: askpassEnvironment(), requireSuccess: true)
+        _ = try await VPhoneHost.runCommand(
+            "scp",
+            arguments: arguments,
+            environment: VPhoneHost.sshAskpassEnvironment(password: sshPassword, executablePath: patcherBinary),
+            requireSuccess: true
+        )
     }
 
     func scpFrom(_ remotePath: String, localPath: String) async throws {
         let arguments = scpBaseArguments() + ["\(sshUser)@\(sshHost):\(remotePath)", localPath]
-        _ = try await VPhoneHost.runCommand("scp", arguments: arguments, environment: askpassEnvironment(), requireSuccess: true)
+        _ = try await VPhoneHost.runCommand(
+            "scp",
+            arguments: arguments,
+            environment: VPhoneHost.sshAskpassEnvironment(password: sshPassword, executablePath: patcherBinary),
+            requireSuccess: true
+        )
     }
 
     func remoteFileExists(_ path: String) async throws -> Bool {
@@ -554,32 +563,6 @@ private struct VPhoneCFWInstaller {
         let result = try await VPhoneHost.runCommand("git", arguments: ["-C", projectRoot.path, "rev-parse", "--short", "HEAD"], requireSuccess: false)
         let hash = result.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines)
         return hash.isEmpty ? "unknown" : hash
-    }
-
-    func askpassHelperURL() -> URL {
-        temporaryDirectory.appendingPathComponent("ssh-askpass.sh")
-    }
-
-    func ensureAskpassHelper() throws -> URL {
-        let helper = askpassHelperURL()
-        if FileManager.default.fileExists(atPath: helper.path) {
-            return helper
-        }
-        try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
-        let contents = "#!/bin/sh\nprintf '%s\\n' \"${VPHONE_SSH_PASSWORD:-alpine}\"\n"
-        try contents.write(to: helper, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: helper.path)
-        return helper
-    }
-
-    func askpassEnvironment() -> [String: String?] {
-        let helper = try? ensureAskpassHelper()
-        return [
-            "SSH_ASKPASS": helper?.path,
-            "SSH_ASKPASS_REQUIRE": "force",
-            "DISPLAY": "1",
-            "VPHONE_SSH_PASSWORD": sshPassword,
-        ]
     }
 
     func ldidSign(_ binaryURL: URL, entitlements: URL? = nil, bundleID: String?) async throws {

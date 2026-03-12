@@ -5,6 +5,11 @@ import Foundation
 @main
 struct VPhoneMain {
     static func main() async {
+        if ProcessInfo.processInfo.environment["VPHONE_SSH_ASKPASS"] == "1" {
+            print(ProcessInfo.processInfo.environment["VPHONE_SSH_PASSWORD"] ?? "alpine")
+            return
+        }
+
         do {
             let command = try VPhoneCLI.parseAsRoot()
 

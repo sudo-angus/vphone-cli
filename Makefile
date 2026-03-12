@@ -9,7 +9,7 @@ MEMORY      ?= 8192       # Memory in MB (only used during vm_new)
 DISK_SIZE   ?= 64         # Disk size in GB (only used during vm_new)
 RESTORE_UDID ?=           # UDID for restore operations
 RESTORE_ECID ?=           # ECID for restore operations
-IRECOVERY_ECID ?=         # ECID for irecovery operations
+RAMDISK_ECID ?=           # ECID for ramdisk transport operations
 
 # ─── Build info ──────────────────────────────────────────────────
 GIT_HASH    := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
@@ -24,17 +24,12 @@ BUNDLE_BIN  := $(BUNDLE)/Contents/MacOS/vphone-cli
 INFO_PLIST  := sources/Info.plist
 ENTITLEMENTS := sources/vphone.entitlements
 VM_DIR_ABS  := $(abspath $(VM_DIR))
-VENV        := .venv
-LIMD_PREFIX := .limd
 TOOLS_PREFIX := .tools
-IRECOVERY   := $(LIMD_PREFIX)/bin/irecovery
-IDEVICERESTORE := $(LIMD_PREFIX)/bin/idevicerestore
-PYTHON      := $(CURDIR)/$(VENV)/bin/python3
 
 SWIFT_SOURCES := $(shell find sources -name '*.swift')
 
 # ─── Environment — prefer project-local binaries ────────────────
-export PATH := $(CURDIR)/$(TOOLS_PREFIX)/bin:$(CURDIR)/$(LIMD_PREFIX)/bin:$(CURDIR)/$(VENV)/bin:$(CURDIR)/.build/release:$(PATH)
+export PATH := $(CURDIR)/$(TOOLS_PREFIX)/bin:$(CURDIR)/.build/release:$(PATH)
 
 # ─── Default ──────────────────────────────────────────────────────
 .PHONY: help
@@ -50,7 +45,7 @@ help:
 	@echo "             SUDO_PASSWORD=...         Preload sudo credential for setup flow"
 	@echo ""
 	@echo "Setup (one-time):"
-	@echo "  make setup_tools             Install required host tools (ldid, git-lfs, inject)"
+	@echo "  make setup_tools             Install required host tools (vendored ldid, git-lfs, inject)"
 	@echo ""
 	@echo "Build:"
 	@echo "  make build                   Build + sign vphone-cli"
@@ -152,26 +147,24 @@ $(BINARY): $(SWIFT_SOURCES) Package.swift $(ENTITLEMENTS)
 	codesign --force --sign - --entitlements $(ENTITLEMENTS) $@
 	@echo "  signed OK"
 
-bundle: build $(INFO_PLIST)
+bundle: build setup_tools $(INFO_PLIST)
 	@mkdir -p $(BUNDLE)/Contents/MacOS $(BUNDLE)/Contents/Resources
 	@cp -f $(BINARY) $(BUNDLE_BIN)
 	@cp -f $(INFO_PLIST) $(BUNDLE)/Contents/Info.plist
 	@cp -f sources/AppIcon.icns $(BUNDLE)/Contents/Resources/AppIcon.icns
 	@cp -f $(SCRIPTS)/vphoned/signcert.p12 $(BUNDLE)/Contents/Resources/signcert.p12
-	@cp -f $$(command -v ldid) $(BUNDLE)/Contents/MacOS/ldid
+	@cp -f $(CURDIR)/$(TOOLS_PREFIX)/bin/ldid $(BUNDLE)/Contents/MacOS/ldid
 	@codesign --force --sign - $(BUNDLE)/Contents/MacOS/ldid
 	@codesign --force --sign - --entitlements $(ENTITLEMENTS) $(BUNDLE_BIN)
 	@echo "  bundled → $(BUNDLE)"
 
-# Cross-compile + sign vphoned daemon for iOS arm64 (requires ldid)
+# Cross-compile + sign vphoned daemon for iOS arm64 (requires vendored ldid)
 .PHONY: vphoned
-vphoned:
-	@command -v ldid >/dev/null 2>&1 \
-		|| (echo "Error: ldid not found. Run: brew install ldid-procursus" && exit 1)
+vphoned: setup_tools
 	$(MAKE) -C $(SCRIPTS)/vphoned GIT_HASH=$(GIT_HASH)
 	@echo "=== Signing vphoned ==="
 	cp $(SCRIPTS)/vphoned/vphoned $(VM_DIR)/.vphoned.signed
-	ldid \
+	"$(CURDIR)/$(TOOLS_PREFIX)/bin/ldid" \
 		-S$(SCRIPTS)/vphoned/entitlements.plist \
 		-M "-K$(SCRIPTS)/vphoned/signcert.p12" \
 		$(VM_DIR)/.vphoned.signed
@@ -258,13 +251,13 @@ fw_patch_jb: patcher_build
 .PHONY: restore_get_shsh restore
 
 restore_get_shsh:
-	cd $(VM_DIR) && "$(CURDIR)/$(IDEVICERESTORE)" \
+	cd $(VM_DIR) && idevicerestore \
 		$(if $(RESTORE_UDID),-u $(RESTORE_UDID),) \
 		$(if $(RESTORE_ECID),-i $(RESTORE_ECID),) \
 		-e -y ./iPhone*_Restore -t
 
 restore:
-	cd $(VM_DIR) && "$(CURDIR)/$(IDEVICERESTORE)" \
+	cd $(VM_DIR) && idevicerestore \
 		$(if $(RESTORE_UDID),-u $(RESTORE_UDID),) \
 		$(if $(RESTORE_ECID),-i $(RESTORE_ECID),) \
 		-e -y ./iPhone*_Restore
@@ -280,8 +273,7 @@ ramdisk_build: patcher_build
 
 ramdisk_send:
 	cd $(VM_DIR) && \
-		IRECOVERY="$(CURDIR)/$(IRECOVERY)" \
-		IRECOVERY_ECID="$(IRECOVERY_ECID)" \
+		RAMDISK_ECID="$(RAMDISK_ECID)" \
 		RAMDISK_UDID="$(RAMDISK_UDID)" \
 		RESTORE_UDID="$(RESTORE_UDID)" \
 		"$(CURDIR)/$(PATCHER_BINARY)" send-ramdisk

@@ -15,10 +15,10 @@ struct SetupToolsCLI: AsyncParsableCommand {
         let toolsPrefix = resolveToolsPrefix(projectRoot: projectRoot)
 
         try await installBrewPackages([
-            ("ldid-procursus", "ldid"),
             ("git-lfs", "git-lfs"),
         ])
 
+        try await installLDID(projectRoot: projectRoot, toolsPrefix: toolsPrefix)
         try await installInject(toolsPrefix: toolsPrefix)
 
         print("")
@@ -50,7 +50,7 @@ struct SetupToolsCLI: AsyncParsableCommand {
     }
 
     func installBrewPackages(_ packages: [(package: String, command: String)]) async throws {
-        print("[1/2] Checking Homebrew packages...")
+        print("[1/3] Checking Homebrew packages...")
         var missingPackages: [String] = []
 
         for package in packages {
@@ -73,9 +73,48 @@ struct SetupToolsCLI: AsyncParsableCommand {
         _ = try await VPhoneHost.runCommand("brew", arguments: ["install"] + missingPackages, requireSuccess: true)
     }
 
+    func installLDID(projectRoot: URL, toolsPrefix: URL) async throws {
+        let ldidBinary = toolsPrefix.appendingPathComponent("bin/ldid")
+        print("[2/3] ldid")
+        if FileManager.default.isExecutableFile(atPath: ldidBinary.path) {
+            print("  Already built: \(ldidBinary.path)")
+            return
+        }
+
+        guard which("make") != nil else {
+            throw ValidationError("Missing required command: make")
+        }
+        guard which("pkg-config") != nil else {
+            throw ValidationError("Missing required command: pkg-config")
+        }
+
+        let sourceURL = projectRoot.appendingPathComponent("vendor/ldid", isDirectory: true)
+        guard FileManager.default.fileExists(atPath: sourceURL.appendingPathComponent("Makefile").path) else {
+            throw ValidationError("Missing vendored ldid source at \(sourceURL.path). Update submodules first.")
+        }
+
+        for package in ["libplist-2.0", "libcrypto"] {
+            let result = try await VPhoneHost.runCommand("pkg-config", arguments: ["--exists", package], requireSuccess: false)
+            guard result.terminationStatus.isSuccess else {
+                throw ValidationError("Missing pkg-config dependency for vendored ldid: \(package)")
+            }
+        }
+
+        _ = try? await VPhoneHost.runCommand("make", arguments: ["-C", sourceURL.path, "clean"], requireSuccess: false)
+        _ = try await VPhoneHost.runCommand("make", arguments: ["-C", sourceURL.path], requireSuccess: true)
+
+        try FileManager.default.createDirectory(at: toolsPrefix.appendingPathComponent("bin", isDirectory: true), withIntermediateDirectories: true)
+        if FileManager.default.fileExists(atPath: ldidBinary.path) {
+            try FileManager.default.removeItem(at: ldidBinary)
+        }
+        try FileManager.default.copyItem(at: sourceURL.appendingPathComponent("ldid"), to: ldidBinary)
+        _ = try? await VPhoneHost.runCommand("make", arguments: ["-C", sourceURL.path, "clean"], requireSuccess: false)
+        print("  Installed: \(ldidBinary.path)")
+    }
+
     func installInject(toolsPrefix: URL) async throws {
         let injectBinary = toolsPrefix.appendingPathComponent("bin/inject")
-        print("[2/2] inject")
+        print("[3/3] inject")
         if FileManager.default.isExecutableFile(atPath: injectBinary.path) {
             print("  Already built: \(injectBinary.path)")
             return

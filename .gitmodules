@@ -25,3 +25,6 @@
 [submodule "vendor/inject"]
 	path = vendor/inject
 	url = https://github.com/paradiseduo/inject
+[submodule "vendor/ldid"]
+	path = vendor/ldid
+	url = https://github.com/ProcursusTeam/ldid

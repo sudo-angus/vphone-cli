@@ -66,7 +66,7 @@ Boot into Recovery (long press power button), open Terminal, then choose one set
   After restarting into macOS:
 
   ```bash
-  xcrun python3 -m pip install amfidont
+  pip3 install amfidont
   sudo amfidont --path [PATH_TO_VPHONE_DIR]
   ```
 
@@ -81,9 +81,7 @@ Boot into Recovery (long press power button), open Terminal, then choose one set
 
 **Install dependencies:**
 
-```bash
-brew install wget gnu-tar openssl@3 ldid-procursus git-lfs
-```
+`make setup_tools` builds vendored `ldid`, builds vendored `inject`, and installs `git-lfs` if needed.
 
 **Submodules** — this repo uses a git submodule for resource archives. Clone with:
 

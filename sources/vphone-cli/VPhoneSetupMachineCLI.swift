@@ -118,7 +118,7 @@ private struct SetupMachineRunner {
 
         let ramdiskIdentity = try await waitForIdentity()
         try await runMake("Ramdisk", args: ["ramdisk_build", "RAMDISK_UDID=\(ramdiskIdentity.udid)"])
-        try await runMake("Ramdisk", args: ["ramdisk_send", "IRECOVERY_ECID=0x\(ramdiskIdentity.ecid)", "RAMDISK_UDID=\(ramdiskIdentity.udid)"])
+        try await runMake("Ramdisk", args: ["ramdisk_send", "RAMDISK_ECID=0x\(ramdiskIdentity.ecid)", "RAMDISK_UDID=\(ramdiskIdentity.udid)"])
 
         let forwardedPort = try chooseRandomPort()
         let usbmux = try startUSBMuxForward(localPort: forwardedPort, serial: ramdiskIdentity.udid)
@@ -204,9 +204,6 @@ private struct SetupMachineRunner {
     }
 
     func waitForSSH(port: Int, timeout: TimeInterval = 90) async throws {
-        let helper = try createAskpassHelper()
-        defer { try? FileManager.default.removeItem(at: helper) }
-
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             let result = try await VPhoneHost.runCommand(
@@ -222,12 +219,7 @@ private struct SetupMachineRunner {
                     "root@127.0.0.1",
                     "echo ready",
                 ],
-                environment: [
-                    "SSH_ASKPASS": helper.path,
-                    "SSH_ASKPASS_REQUIRE": "force",
-                    "DISPLAY": "1",
-                    "VPHONE_SSH_PASSWORD": "alpine",
-                ],
+                environment: VPhoneHost.sshAskpassEnvironment(password: "alpine"),
                 requireSuccess: false
             )
             if result.terminationStatus.isSuccess { return }
@@ -295,14 +287,6 @@ private struct SetupMachineRunner {
             try await Task.sleep(for: .seconds(1))
         }
         throw ValidationError("Timed out waiting for first boot prompt")
-    }
-
-    func createAskpassHelper() throws -> URL {
-        let helper = logDirectory.appendingPathComponent("ssh-askpass.sh")
-        let content = "#!/bin/sh\nprintf '%s\\n' \"${VPHONE_SSH_PASSWORD:-alpine}\"\n"
-        try content.write(to: helper, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: helper.path)
-        return helper
     }
 
     func chooseRandomPort() throws -> Int {

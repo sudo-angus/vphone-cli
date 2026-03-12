@@ -21,15 +21,9 @@ struct SendRamdiskCLI: AsyncParsableCommand {
 
     mutating func run() async throws {
         let env = ProcessInfo.processInfo.environment
-        let irecovery = irecovery ?? env["IRECOVERY"] ?? "irecovery"
+        let irecovery = irecovery ?? env["IRECOVERY"]
         let udid = udid ?? env["RAMDISK_UDID"] ?? env["RESTORE_UDID"]
-        let ecid = try normalizedECID(ecid ?? env["IRECOVERY_ECID"])
-
-        var irecoveryArguments: [String] = []
-        if let ecid {
-            irecoveryArguments += ["-i", ecid]
-            print("[*] Using ECID selector for irecovery: \(ecid)")
-        }
+        let ecid = try normalizedECID(ecid ?? env["RAMDISK_ECID"] ?? env["IRECOVERY_ECID"])
 
         print("[*] Identity context for ramdisk_send:")
         print("    UDID: \(udid ?? "<unset>")")
@@ -51,28 +45,57 @@ struct SendRamdiskCLI: AsyncParsableCommand {
 
         print("[*] Sending ramdisk from \(ramdiskDirectory.path) ...")
 
-        try await sendFile(named: "iBSS.vresearch101.RELEASE.img4", step: "1/8", command: nil, irecovery: irecovery, baseArguments: irecoveryArguments)
-        try await sendFile(named: "iBEC.vresearch101.RELEASE.img4", step: "2/8", command: "go", irecovery: irecovery, baseArguments: irecoveryArguments)
-        try await Task.sleep(nanoseconds: 1_000_000_000)
+        if let irecovery {
+            var irecoveryArguments: [String] = []
+            if let ecid {
+                irecoveryArguments += ["-i", ecid]
+                print("[*] Using external irecovery transport for ECID: \(ecid)")
+            }
 
-        try await sendFile(named: "sptm.vresearch1.release.img4", step: "3/8", command: "firmware", irecovery: irecovery, baseArguments: irecoveryArguments)
-        try await sendFile(named: "txm.img4", step: "4/8", command: "firmware", irecovery: irecovery, baseArguments: irecoveryArguments)
-        try await sendFile(named: "trustcache.img4", step: "5/8", command: "firmware", irecovery: irecovery, baseArguments: irecoveryArguments)
+            try await sendFile(named: "iBSS.vresearch101.RELEASE.img4", step: "1/8", command: nil, irecovery: irecovery, baseArguments: irecoveryArguments)
+            try await sendFile(named: "iBEC.vresearch101.RELEASE.img4", step: "2/8", command: "go", irecovery: irecovery, baseArguments: irecoveryArguments)
+            try await Task.sleep(nanoseconds: 1_000_000_000)
 
-        try await sendFile(named: "ramdisk.img4", step: "6/8", command: nil, irecovery: irecovery, baseArguments: irecoveryArguments)
-        try await Task.sleep(nanoseconds: 2_000_000_000)
-        try await sendCommand("ramdisk", irecovery: irecovery, baseArguments: irecoveryArguments)
+            try await sendFile(named: "sptm.vresearch1.release.img4", step: "3/8", command: "firmware", irecovery: irecovery, baseArguments: irecoveryArguments)
+            try await sendFile(named: "txm.img4", step: "4/8", command: "firmware", irecovery: irecovery, baseArguments: irecoveryArguments)
+            try await sendFile(named: "trustcache.img4", step: "5/8", command: "firmware", irecovery: irecovery, baseArguments: irecoveryArguments)
 
-        try await sendFile(named: "DeviceTree.vphone600ap.img4", step: "7/8", command: "devicetree", irecovery: irecovery, baseArguments: irecoveryArguments)
-        try await sendFile(named: "sep-firmware.vresearch101.RELEASE.img4", step: "8/8", command: "firmware", irecovery: irecovery, baseArguments: irecoveryArguments)
+            try await sendFile(named: "ramdisk.img4", step: "6/8", command: nil, irecovery: irecovery, baseArguments: irecoveryArguments)
+            try await Task.sleep(nanoseconds: 2_000_000_000)
+            try await sendCommand("ramdisk", irecovery: irecovery, baseArguments: irecoveryArguments)
 
-        print("  [*] Booting kernel...")
-        _ = try await VPhoneHost.runCommand(
-            irecovery,
-            arguments: irecoveryArguments + ["-f", kernelURL.path],
-            requireSuccess: true
-        )
-        try await sendCommand("bootx", irecovery: irecovery, baseArguments: irecoveryArguments)
+            try await sendFile(named: "DeviceTree.vphone600ap.img4", step: "7/8", command: "devicetree", irecovery: irecovery, baseArguments: irecoveryArguments)
+            try await sendFile(named: "sep-firmware.vresearch101.RELEASE.img4", step: "8/8", command: "firmware", irecovery: irecovery, baseArguments: irecoveryArguments)
+
+            print("  [*] Booting kernel...")
+            _ = try await VPhoneHost.runCommand(
+                irecovery,
+                arguments: irecoveryArguments + ["-f", kernelURL.path],
+                requireSuccess: true
+            )
+            try await sendCommand("bootx", irecovery: irecovery, baseArguments: irecoveryArguments)
+        } else {
+            let numericECID = try normalizedECIDValue(ecid)
+            print("[*] Using MobileDevice.framework transport")
+
+            try sendViaMobileDevice(named: "iBSS.vresearch101.RELEASE.img4", step: "1/8", ecid: numericECID, command: nil)
+            try sendViaMobileDevice(named: "iBEC.vresearch101.RELEASE.img4", step: "2/8", ecid: numericECID, command: nil)
+
+            print("  [*] Waiting for recovery mode transition...")
+            try MobileDeviceRamdiskTransport.waitForRecovery(ecid: numericECID)
+
+            try sendViaMobileDevice(named: "sptm.vresearch1.release.img4", step: "3/8", ecid: numericECID, command: "firmware")
+            try sendViaMobileDevice(named: "txm.img4", step: "4/8", ecid: numericECID, command: "firmware")
+            try sendViaMobileDevice(named: "trustcache.img4", step: "5/8", ecid: numericECID, command: "firmware")
+            try sendViaMobileDevice(named: "ramdisk.img4", step: "6/8", ecid: numericECID, command: nil)
+            try MobileDeviceRamdiskTransport.sendRecoveryCommand("ramdisk", ecid: numericECID)
+            try sendViaMobileDevice(named: "DeviceTree.vphone600ap.img4", step: "7/8", ecid: numericECID, command: "devicetree")
+            try sendViaMobileDevice(named: "sep-firmware.vresearch101.RELEASE.img4", step: "8/8", ecid: numericECID, command: "firmware")
+
+            print("  [*] Booting kernel...")
+            try MobileDeviceRamdiskTransport.sendRecoveryFile(path: kernelURL.path, ecid: numericECID)
+            try MobileDeviceRamdiskTransport.sendRecoveryCommand("bootx", ecid: numericECID)
+        }
 
         print("[+] Boot sequence complete. Device should be booting into ramdisk.")
     }
@@ -85,9 +108,16 @@ private extension SendRamdiskCLI {
         }
         rawValue = rawValue.replacingOccurrences(of: "0x", with: "", options: [.caseInsensitive])
         guard rawValue.range(of: #"^[0-9A-Fa-f]{1,16}$"#, options: .regularExpression) != nil else {
-            throw ValidationError("Invalid IRECOVERY_ECID: \(rawValue)")
+            throw ValidationError("Invalid ECID: \(rawValue)")
         }
         return "0x\(rawValue.uppercased())"
+    }
+
+    func normalizedECIDValue(_ rawValue: String?) throws -> UInt64? {
+        guard let normalized = try normalizedECID(rawValue) else {
+            return nil
+        }
+        return UInt64(normalized.dropFirst(2), radix: 16)
     }
 
     func sendFile(
@@ -116,5 +146,19 @@ private extension SendRamdiskCLI {
             arguments: baseArguments + ["-c", command],
             requireSuccess: true
         )
+    }
+
+    func sendViaMobileDevice(named fileName: String, step: String, ecid: UInt64?, command: String?) throws {
+        let fileURL = ramdiskDirectory.appendingPathComponent(fileName)
+        try VPhoneHost.requireFile(fileURL)
+        print("  [\(step)] Loading \(fileName)...")
+        if step == "1/8" || step == "2/8" {
+            try MobileDeviceRamdiskTransport.sendDFUFile(path: fileURL.path, ecid: ecid)
+        } else {
+            try MobileDeviceRamdiskTransport.sendRecoveryFile(path: fileURL.path, ecid: ecid)
+        }
+        if let command {
+            try MobileDeviceRamdiskTransport.sendRecoveryCommand(command, ecid: ecid)
+        }
     }
 }

@@ -166,6 +166,23 @@ enum VPhoneHost {
         return .name(executable)
     }
 
+    static func currentExecutablePath() -> String {
+        if let executableURL = Bundle.main.executableURL {
+            return executableURL.path
+        }
+        return URL(fileURLWithPath: CommandLine.arguments[0]).path
+    }
+
+    static func sshAskpassEnvironment(password: String, executablePath: String? = nil) -> [String: String?] {
+        [
+            "SSH_ASKPASS": executablePath ?? currentExecutablePath(),
+            "SSH_ASKPASS_REQUIRE": "force",
+            "DISPLAY": "1",
+            "VPHONE_SSH_ASKPASS": "1",
+            "VPHONE_SSH_PASSWORD": password,
+        ]
+    }
+
     static func currentDirectoryURL() -> URL {
         URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
     }

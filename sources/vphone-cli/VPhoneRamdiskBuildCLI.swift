@@ -152,7 +152,7 @@ private extension BuildRamdiskCLI {
 
     func checkPrerequisites() throws {
         let required = [
-            ("ldid", "ldid-procursus"),
+            ("ldid", "vendored via make setup_tools"),
         ]
         let missing = required.compactMap { command, package in
             which(command) == nil ? "\(command) — \(package)" : nil
