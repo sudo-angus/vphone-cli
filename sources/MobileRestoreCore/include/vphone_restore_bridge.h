@@ -41,8 +41,15 @@ enum {
 
 int vphone_restore_run(const struct vphone_restore_options* options);
 const char* vphone_irecv_error_string(int error);
+void* vphone_irecv_open_session(uint64_t ecid, int has_ecid, int mode, int attempts, int* error_out);
+void vphone_irecv_close_session(void* session);
+int vphone_irecv_session_send_file(void* session, const char* path, uint32_t options);
+int vphone_irecv_session_send_command(void* session, const char* command);
+int vphone_irecv_session_send_command_breq(void* session, const char* command, uint8_t request);
+int vphone_irecv_session_usb_control_transfer(void* session, uint8_t request_type, uint8_t request, uint16_t value, uint16_t index, int timeout_ms);
 int vphone_irecv_send_file(const char* path, uint64_t ecid, int has_ecid, int mode, uint32_t options);
 int vphone_irecv_send_command(const char* command, uint64_t ecid, int has_ecid, int mode);
+int vphone_irecv_send_command_breq(const char* command, uint8_t request, uint64_t ecid, int has_ecid, int mode);
 int vphone_irecv_wait_for_mode(uint64_t ecid, int has_ecid, int mode, int timeout_ms);
 
 #ifdef __cplusplus

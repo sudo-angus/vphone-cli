@@ -1,6 +1,5 @@
 import ArgumentParser
 import Foundation
-import Subprocess
 
 struct CFWInstallCLI: AsyncParsableCommand {
     enum Variant: String, ExpressibleByArgument {
@@ -405,8 +404,13 @@ private final class VPhoneCFWInstaller {
 
     func installGPUDriver() async throws {
         let archive = cfwInputDirectory.appendingPathComponent("custom/AppleParavirtGPUMetalIOGPUFamily.tar")
-        try await scpTo(archive.path, remotePath: "/mnt1")
-        _ = try await ssh("/usr/bin/tar --preserve-permissions --no-overwrite-dir -xf /mnt1/AppleParavirtGPUMetalIOGPUFamily.tar -C /mnt1")
+        let unpackDirectory = temporaryDirectory.appendingPathComponent(".gpu_driver_tmp", isDirectory: true)
+        try? FileManager.default.removeItem(at: unpackDirectory)
+        try FileManager.default.createDirectory(at: unpackDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: unpackDirectory) }
+
+        try VPhoneArchive.extractTarArchive(archive, to: unpackDirectory)
+        try requireSSHClient().uploadDirectoryContents(localURL: unpackDirectory, remotePath: "/mnt1")
         let bundle = "/mnt1/System/Library/Extensions/AppleParavirtGPUMetalIOGPUFamily.bundle"
         _ = try await ssh("find \(bundle) -name '._*' -delete 2>/dev/null || true")
         _ = try await ssh("/usr/sbin/chown -R 0:0 \(bundle)")
@@ -416,14 +420,17 @@ private final class VPhoneCFWInstaller {
         _ = try await ssh("/bin/chmod 0755 \(bundle)/_CodeSignature")
         _ = try await ssh("/bin/chmod 0644 \(bundle)/_CodeSignature/CodeResources")
         _ = try await ssh("/bin/chmod 0644 \(bundle)/Info.plist")
-        _ = try await ssh("/bin/rm -f /mnt1/AppleParavirtGPUMetalIOGPUFamily.tar")
     }
 
     func installIosbinpack() async throws {
         let archive = cfwInputDirectory.appendingPathComponent("jb/iosbinpack64.tar")
-        try await scpTo(archive.path, remotePath: "/mnt1")
-        _ = try await ssh("/usr/bin/tar --preserve-permissions --no-overwrite-dir -xf /mnt1/iosbinpack64.tar -C /mnt1")
-        _ = try await ssh("/bin/rm -f /mnt1/iosbinpack64.tar")
+        let unpackDirectory = temporaryDirectory.appendingPathComponent(".iosbinpack_install_tmp", isDirectory: true)
+        try? FileManager.default.removeItem(at: unpackDirectory)
+        try FileManager.default.createDirectory(at: unpackDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: unpackDirectory) }
+
+        try VPhoneArchive.extractTarArchive(archive, to: unpackDirectory)
+        try requireSSHClient().uploadDirectoryContents(localURL: unpackDirectory, remotePath: "/mnt1")
     }
 
     func patchLaunchdCacheLoader() async throws {
@@ -574,9 +581,13 @@ private final class VPhoneCFWInstaller {
         let bootstrapArchive = jbInputDirectory.appendingPathComponent("jb/bootstrap-iphoneos-arm64.tar.zst")
         let sileoDeb = jbInputDirectory.appendingPathComponent("jb/org.coolstar.sileo_2.5.1_iphoneos-arm64.deb")
         let bootstrapTar = temporaryDirectory.appendingPathComponent("bootstrap-iphoneos-arm64.tar")
+        let bootstrapDirectory = temporaryDirectory.appendingPathComponent(".bootstrap_install_tmp", isDirectory: true)
 
         try VPhoneArchive.decompressZstdFile(at: bootstrapArchive, to: bootstrapTar)
-        try await scpTo(bootstrapTar.path, remotePath: "/mnt5/\(bootHash)/bootstrap-iphoneos-arm64.tar")
+        try? FileManager.default.removeItem(at: bootstrapDirectory)
+        try FileManager.default.createDirectory(at: bootstrapDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: bootstrapDirectory) }
+        try VPhoneArchive.extractTarArchive(bootstrapTar, to: bootstrapDirectory)
         if FileManager.default.fileExists(atPath: sileoDeb.path) {
             try await scpTo(sileoDeb.path, remotePath: "/mnt5/\(bootHash)/org.coolstar.sileo_2.5.1_iphoneos-arm64.deb")
         }
@@ -587,11 +598,10 @@ private final class VPhoneCFWInstaller {
         _ = try await ssh("/bin/mkdir -p /mnt5/\(bootHash)/\(jbName)")
         _ = try await ssh("/bin/chmod 0755 /mnt5/\(bootHash)/\(jbName)")
         _ = try await ssh("/usr/sbin/chown 0:0 /mnt5/\(bootHash)/\(jbName)")
-        _ = try await ssh("/usr/bin/tar --preserve-permissions -xf /mnt5/\(bootHash)/bootstrap-iphoneos-arm64.tar -C /mnt5/\(bootHash)/\(jbName)/")
+        try requireSSHClient().uploadDirectoryContents(localURL: bootstrapDirectory, remotePath: "/mnt5/\(bootHash)/\(jbName)")
         _ = try await ssh("/bin/mv /mnt5/\(bootHash)/\(jbName)/var /mnt5/\(bootHash)/\(jbName)/procursus")
         _ = try await ssh("/bin/mv /mnt5/\(bootHash)/\(jbName)/procursus/jb/* /mnt5/\(bootHash)/\(jbName)/procursus 2>/dev/null || true")
         _ = try await ssh("/bin/rm -rf /mnt5/\(bootHash)/\(jbName)/procursus/jb")
-        _ = try await ssh("/bin/rm -f /mnt5/\(bootHash)/bootstrap-iphoneos-arm64.tar")
     }
 
     func deployBaseBin() async throws {

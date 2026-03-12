@@ -43,23 +43,41 @@ struct SendRamdiskCLI: AsyncParsableCommand {
         let numericECID = try normalizedECIDValue(ecid)
         print("[*] Using libirecovery transport")
 
-        try sendViaIRecovery(named: "iBSS.vresearch101.RELEASE.img4", step: "1/8", ecid: numericECID, command: nil)
-        try sendViaIRecovery(named: "iBEC.vresearch101.RELEASE.img4", step: "2/8", ecid: numericECID, command: nil)
+        print("  [*] Sending iBSS in DFU mode...")
+        try VPhoneIRecovery.sendDFUFile(
+            path: ramdiskDirectory.appendingPathComponent("iBSS.vresearch101.RELEASE.img4").path,
+            ecid: numericECID
+        )
 
-        print("  [*] Waiting for recovery mode transition...")
+        print("  [*] Waiting for iBSS transition into recovery mode...")
         try VPhoneIRecovery.waitForRecovery(ecid: numericECID)
 
-        try sendViaIRecovery(named: "sptm.vresearch1.release.img4", step: "3/8", ecid: numericECID, command: "firmware")
-        try sendViaIRecovery(named: "txm.img4", step: "4/8", ecid: numericECID, command: "firmware")
-        try sendViaIRecovery(named: "trustcache.img4", step: "5/8", ecid: numericECID, command: "firmware")
-        try sendViaIRecovery(named: "ramdisk.img4", step: "6/8", ecid: numericECID, command: nil)
-        try VPhoneIRecovery.sendRecoveryCommand("ramdisk", ecid: numericECID)
-        try sendViaIRecovery(named: "DeviceTree.vphone600ap.img4", step: "7/8", ecid: numericECID, command: "devicetree")
-        try sendViaIRecovery(named: "sep-firmware.vresearch101.RELEASE.img4", step: "8/8", ecid: numericECID, command: "firmware")
+        print("  [2/8] Loading iBEC.vresearch101.RELEASE.img4...")
+        let iBECSession = try VPhoneIRecovery.openRecoverySession(ecid: numericECID)
+        defer { iBECSession.close() }
+        try iBECSession.sendFile(path: ramdiskDirectory.appendingPathComponent("iBEC.vresearch101.RELEASE.img4").path)
+        try iBECSession.sendCommandBreq("go")
+        try iBECSession.usbControlTransfer(allowFailure: true)
+
+        print("  [*] Waiting for post-iBEC recovery mode...")
+        try VPhoneIRecovery.waitForRecovery(ecid: numericECID)
+
+        let recoverySession = try VPhoneIRecovery.openRecoverySession(ecid: numericECID)
+        defer { recoverySession.close() }
+        try sendViaRecoverySession(recoverySession, named: "sptm.vresearch1.release.img4", step: "3/8", command: "firmware")
+        try sendViaRecoverySession(recoverySession, named: "txm.img4", step: "4/8", command: "firmware")
+        try sendViaRecoverySession(recoverySession, named: "trustcache.img4", step: "5/8", command: "firmware")
+        try sendViaRecoverySession(recoverySession, named: "ramdisk.img4", step: "6/8", command: nil)
+        try recoverySession.sendCommand("getenv ramdisk-delay")
+        try recoverySession.sendCommand("ramdisk")
+        try await Task.sleep(for: .seconds(2))
+        try sendViaRecoverySession(recoverySession, named: "DeviceTree.vphone600ap.img4", step: "7/8", command: "devicetree")
+        try sendViaRecoverySession(recoverySession, named: "sep-firmware.vresearch101.RELEASE.img4", step: "8/8", command: "rsepfirmware")
 
         print("  [*] Booting kernel...")
-        try VPhoneIRecovery.sendRecoveryFile(path: kernelURL.path, ecid: numericECID)
-        try VPhoneIRecovery.sendRecoveryCommand("bootx", ecid: numericECID)
+        try recoverySession.sendFile(path: kernelURL.path)
+        try recoverySession.usbControlTransfer(allowFailure: true)
+        try recoverySession.sendCommandBreq("bootx")
 
         print("[+] Boot sequence complete. Device should be booting into ramdisk.")
     }
@@ -84,17 +102,13 @@ private extension SendRamdiskCLI {
         return UInt64(normalized.dropFirst(2), radix: 16)
     }
 
-    func sendViaIRecovery(named fileName: String, step: String, ecid: UInt64?, command: String?) throws {
+    func sendViaRecoverySession(_ session: RecoverySession, named fileName: String, step: String, command: String?) throws {
         let fileURL = ramdiskDirectory.appendingPathComponent(fileName)
         try VPhoneHost.requireFile(fileURL)
         print("  [\(step)] Loading \(fileName)...")
-        if step == "1/8" || step == "2/8" {
-            try VPhoneIRecovery.sendDFUFile(path: fileURL.path, ecid: ecid)
-        } else {
-            try VPhoneIRecovery.sendRecoveryFile(path: fileURL.path, ecid: ecid)
-        }
+        try session.sendFile(path: fileURL.path)
         if let command {
-            try VPhoneIRecovery.sendRecoveryCommand(command, ecid: ecid)
+            try session.sendCommand(command)
         }
     }
 }

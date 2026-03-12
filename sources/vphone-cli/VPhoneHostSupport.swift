@@ -100,6 +100,11 @@ enum VPhoneHost {
             return try await runCommand(executable, arguments: arguments, requireSuccess: requireSuccess)
         }
 
+        let directResult = try await runCommand(executable, arguments: arguments, requireSuccess: false)
+        if directResult.terminationStatus.isSuccess {
+            return directResult
+        }
+
         let fullCommand = [executable] + arguments
         let probe = try await runCommand("sudo", arguments: ["-n", "true"])
         if probe.terminationStatus.isSuccess {
@@ -119,6 +124,19 @@ enum VPhoneHost {
             standardOutput: (result.standardOutput ?? "").trimmingCharacters(in: CharacterSet.newlines),
             standardError: (result.standardError ?? "").trimmingCharacters(in: CharacterSet.newlines)
         )
+        if !commandResult.terminationStatus.isSuccess,
+           (commandResult.combinedOutput.isEmpty || commandResult.combinedOutput == "sudo: a password is required")
+        {
+            if requireSuccess {
+                throw VPhoneHostError.commandFailed(
+                    executable: executable,
+                    arguments: arguments,
+                    status: directResult.terminationStatus,
+                    output: directResult.combinedOutput
+                )
+            }
+            return directResult
+        }
         if requireSuccess, !commandResult.terminationStatus.isSuccess {
             throw VPhoneHostError.commandFailed(
                 executable: "sudo \(executable)",

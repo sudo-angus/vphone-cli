@@ -136,12 +136,19 @@ final class VPhoneSSHClient: @unchecked Sendable {
     }
 
     func uploadDirectory(localURL: URL, remotePath: String) throws {
-        let archiveData = try VPhoneArchive.createTarArchive(from: localURL)
-        let temporaryRemotePath = "/tmp/vphone-upload-\(UUID().uuidString).tar"
-        try uploadData(archiveData, remotePath: temporaryRemotePath)
-        _ = try execute(
-            "/bin/mkdir -p \(shellQuote(remotePath)) && /usr/bin/tar --preserve-permissions --no-overwrite-dir -xf \(shellQuote(temporaryRemotePath)) -C \(shellQuote(remotePath)) && /bin/rm -f \(shellQuote(temporaryRemotePath))"
-        )
+        try uploadItem(localURL: localURL, remotePath: remotePath)
+    }
+
+    func uploadDirectoryContents(localURL: URL, remotePath: String) throws {
+        try createRemoteDirectory(remotePath)
+        let children = try FileManager.default.contentsOfDirectory(
+            at: localURL,
+            includingPropertiesForKeys: nil,
+            options: []
+        ).sorted { $0.lastPathComponent < $1.lastPathComponent }
+        for child in children {
+            try uploadItem(localURL: child, remotePath: remotePath + "/" + child.lastPathComponent)
+        }
     }
 
     static func probe(host: String, port: Int, username: String, password: String) -> Bool {
@@ -158,6 +165,57 @@ final class VPhoneSSHClient: @unchecked Sendable {
 
     private func shellQuote(_ string: String) -> String {
         "'" + string.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    private func uploadItem(localURL: URL, remotePath: String) throws {
+        let fileManager = FileManager.default
+        let values = try localURL.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey])
+
+        if values.isDirectory == true {
+            try createRemoteDirectory(remotePath)
+            try applyPOSIXPermissionsIfPresent(for: localURL, remotePath: remotePath)
+            let children = try fileManager.contentsOfDirectory(
+                at: localURL,
+                includingPropertiesForKeys: nil,
+                options: []
+            ).sorted { $0.lastPathComponent < $1.lastPathComponent }
+            for child in children {
+                try uploadItem(localURL: child, remotePath: remotePath + "/" + child.lastPathComponent)
+            }
+            return
+        }
+
+        if values.isSymbolicLink == true {
+            let destination = try fileManager.destinationOfSymbolicLink(atPath: localURL.path)
+            let parent = (remotePath as NSString).deletingLastPathComponent
+            try createRemoteDirectory(parent)
+            _ = try execute(
+                "/bin/rm -rf \(shellQuote(remotePath)) && /bin/ln -s \(shellQuote(destination)) \(shellQuote(remotePath))"
+            )
+            return
+        }
+
+        guard values.isRegularFile == true else {
+            return
+        }
+        let parent = (remotePath as NSString).deletingLastPathComponent
+        try createRemoteDirectory(parent)
+        try uploadFile(localURL: localURL, remotePath: remotePath)
+        try applyPOSIXPermissionsIfPresent(for: localURL, remotePath: remotePath)
+    }
+
+    private func createRemoteDirectory(_ path: String) throws {
+        guard !path.isEmpty, path != "." else { return }
+        _ = try execute("/bin/mkdir -p \(shellQuote(path))")
+    }
+
+    private func applyPOSIXPermissionsIfPresent(for localURL: URL, remotePath: String) throws {
+        let attributes = try FileManager.default.attributesOfItem(atPath: localURL.path)
+        guard let permissions = attributes[.posixPermissions] as? NSNumber else {
+            return
+        }
+        let mode = String(permissions.intValue, radix: 8)
+        _ = try execute("/bin/chmod \(mode) \(shellQuote(remotePath))")
     }
 }
 

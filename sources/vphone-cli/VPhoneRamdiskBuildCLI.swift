@@ -23,7 +23,7 @@ struct BuildRamdiskCLI: AsyncParsableCommand {
     private static let kernelFourCC = "rkrn"
     private static let ramdiskKernelSuffix = ".ramdisk"
     private static let ramdiskKernelImageName = "krnl.ramdisk.img4"
-    private static let expandedRamdiskSize = "512m"
+    private static let expandedRamdiskSize = "254m"
     private static let ramdiskRemove = [
         "usr/bin/img4tool",
         "usr/bin/img4",
@@ -41,6 +41,11 @@ struct BuildRamdiskCLI: AsyncParsableCommand {
         "sbin",
         "usr/sbin",
         "usr/libexec",
+    ]
+    private static let ramdiskArchiveExcludes: Set<String> = [
+        "usr/bin/file",
+        "usr/lib/libmagic.1.dylib",
+        "usr/share/misc/magic.mgc",
     ]
 
     @Argument(help: "VM directory. Defaults to the current directory.", transform: URL.init(fileURLWithPath:))
@@ -593,7 +598,8 @@ private extension BuildRamdiskCLI {
             print("  Injecting SSH tools...")
             try VPhoneArchive.extractTarGzipArchive(
                 inputDirectory.appendingPathComponent("ssh.tar.gz"),
-                to: mountpoint
+                to: mountpoint,
+                excludingPaths: Self.ramdiskArchiveExcludes
             )
             try patchRestoredExternalUSBMuxLabel(mountpoint: mountpoint)
             try removeUnneededFiles(from: mountpoint)
@@ -618,11 +624,15 @@ private extension BuildRamdiskCLI {
         }
         try? await detachDiskImage(at: mountpoint)
 
-        _ = try await VPhoneHost.runPrivileged(
-            "hdiutil",
-            arguments: ["resize", "-sectors", "min", ramdiskCustomURL.path],
-            requireSuccess: true
-        )
+        do {
+            _ = try await VPhoneHost.runPrivileged(
+                "hdiutil",
+                arguments: ["resize", "-sectors", "min", ramdiskCustomURL.path],
+                requireSuccess: true
+            )
+        } catch {
+            print("  [!] Skipping ramdisk shrink: \(error)")
+        }
 
         print("  Signing ramdisk...")
         let customRamdiskPayload = try Data(contentsOf: ramdiskCustomURL)

@@ -29,11 +29,15 @@ enum VPhoneArchive {
         try writeTarEntries(entries, to: destinationURL)
     }
 
-    static func extractTarGzipArchive(_ archiveURL: URL, to destinationURL: URL) throws {
+    static func extractTarGzipArchive(
+        _ archiveURL: URL,
+        to destinationURL: URL,
+        excludingPaths: Set<String> = []
+    ) throws {
         let compressedData = try Data(contentsOf: archiveURL, options: [.mappedIfSafe])
         let tarData = try GzipArchive.unarchive(archive: compressedData)
         let entries = try TarContainer.open(container: tarData)
-        try writeTarEntries(entries, to: destinationURL)
+        try writeTarEntries(entries, to: destinationURL, excludingPaths: excludingPaths)
     }
 
     static func extractTarZstdArchive(_ archiveURL: URL, to destinationURL: URL) throws {
@@ -65,12 +69,18 @@ enum VPhoneArchive {
         try tarData.write(to: archiveURL)
     }
 
-    static func writeTarEntries(_ entries: [TarEntry], to destinationURL: URL) throws {
+    static func writeTarEntries(
+        _ entries: [TarEntry],
+        to destinationURL: URL,
+        excludingPaths: Set<String> = []
+    ) throws {
         var directoryAttributes = [([FileAttributeKey: Any], String)]()
         for entry in entries where entry.info.type == .directory {
+            guard !shouldExclude(entry.info.name, excludingPaths: excludingPaths) else { continue }
             directoryAttributes.append(try writeTarDirectory(entry, to: destinationURL))
         }
         for entry in entries where entry.info.type != .directory {
+            guard !shouldExclude(entry.info.name, excludingPaths: excludingPaths) else { continue }
             try writeTarEntry(entry, to: destinationURL)
         }
         for (attributes, path) in directoryAttributes {
@@ -233,6 +243,13 @@ enum VPhoneArchive {
         }
         if let groupID = attributes[.groupOwnerAccountID] as? NSNumber {
             info.groupID = groupID.intValue
+        }
+    }
+
+    private static func shouldExclude(_ path: String, excludingPaths: Set<String>) -> Bool {
+        let normalized = path.hasSuffix("/") ? String(path.dropLast()) : path
+        return excludingPaths.contains { excluded in
+            normalized == excluded || normalized.hasPrefix(excluded + "/")
         }
     }
 
