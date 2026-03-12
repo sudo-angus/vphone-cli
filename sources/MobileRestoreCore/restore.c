@@ -4083,19 +4083,29 @@ static int restore_send_bootability_bundle_data(struct idevicerestore_client_t* 
 
 plist_t restore_get_build_identity(struct idevicerestore_client_t* client, uint8_t is_recovery_os)
 {
-	const char *variant;
+	plist_t build_identity = NULL;
 
-	if (is_recovery_os)
-		variant = RESTORE_VARIANT_MACOS_RECOVERY_OS;
-	else if (client->flags & FLAG_ERASE)
-		variant = RESTORE_VARIANT_ERASE_INSTALL;
-	else
-		variant = RESTORE_VARIANT_UPGRADE_INSTALL;
+	if (!is_recovery_os && client->restore && client->restore->build_identity) {
+		build_identity = client->restore->build_identity;
+	} else if (is_recovery_os && client->macos_variant) {
+		build_identity = client->macos_variant;
+	} else {
+		const char *variant;
 
-	plist_t build_identity = build_manifest_get_build_identity_for_model_with_variant(
-			client->build_manifest,
-			client->device->hardware_model,
-			variant, 0);
+		if (is_recovery_os)
+			variant = RESTORE_VARIANT_MACOS_RECOVERY_OS;
+		else if (client->restore_variant)
+			variant = client->restore_variant;
+		else if (client->flags & FLAG_ERASE)
+			variant = RESTORE_VARIANT_ERASE_INSTALL;
+		else
+			variant = RESTORE_VARIANT_UPGRADE_INSTALL;
+
+		build_identity = build_manifest_get_build_identity_for_model_with_variant(
+				client->build_manifest,
+				client->device->hardware_model,
+				variant, 0);
+	}
 
 	plist_t unique_id_node = plist_dict_get_item(client->build_manifest, "UniqueBuildID");
 	if (unique_id_node) {

@@ -65,19 +65,19 @@ git clone --recurse-submodules https://github.com/Lakr233/vphone-cli.git
 ## Quick Start
 
 ```bash
-make setup_machine            # full automation through "First Boot" (includes restore/ramdisk/CFW)
-# options: NONE_INTERACTIVE=1 SUDO_PASSWORD=...
+make setup_machine   # full automation through "First Boot"
+# options: NONE_INTERACTIVE=1 JB=1 DEV=1
 ```
 
 ## Manual Setup
 
 ```bash
-make setup_tools              # install required host tools and build vendored inject
-make build                    # build + sign vphone-cli
-make vm_new                   # create VM directory with manifest (config.plist)
+make setup_tools     # install required host tools and build vendored inject
+make build           # build + sign vphone-cli
+make vm_new          # create VM directory with manifest (config.plist)
 # options: CPU=8 MEMORY=8192 DISK_SIZE=64
-make fw_prepare               # download IPSWs, extract, merge, generate manifest
-make fw_patch                 # patch boot chain (regular variant)
+make fw_prepare      # download IPSWs, extract, merge, generate manifest
+make fw_patch        # patch boot chain (regular variant)
 # or: make fw_patch_dev       # dev variant (+ TXM entitlement/debug bypasses)
 # or: make fw_patch_jb        # jailbreak variant (+ full security bypass)
 ```
@@ -102,13 +102,13 @@ You'll need **two terminals** for the restore process. Keep terminal 1 running w
 
 ```bash
 # terminal 1
-make boot_dfu                 # boot VM in DFU mode (keep running)
+make boot_dfu        # boot VM in DFU mode (keep running)
 ```
 
 ```bash
 # terminal 2
-make restore_get_shsh         # request restore personalization data via idevicerestore/libirecovery
-make restore                  # flash firmware via idevicerestore/libirecovery
+make restore_get_shsh
+make restore
 ```
 
 ## Install Custom Firmware
@@ -117,26 +117,20 @@ Stop the DFU boot in terminal 1 (Ctrl+C), then boot into DFU again for the ramdi
 
 ```bash
 # terminal 1
-make boot_dfu                 # keep running
+make boot_dfu        # keep running
 ```
 
 ```bash
 # terminal 2
-sudo make ramdisk_build       # build signed SSH ramdisk
-make ramdisk_send             # send to device via libirecovery
+make ramdisk_build
+make ramdisk_send
 ```
 
-Once the ramdisk is running (you should see `Running server` in the output), open a **third terminal** for the USBMux forwarder, then install CFW from terminal 2:
+Once the ramdisk is running, install CFW from terminal 2. `cfw-install` now starts the USBMux forwarder in-process via the Swift CLI, so a separate host shell helper is no longer required.
 
 ```bash
-# terminal 3 — keep running
-./.build/debug/vphone-cli usbmux-forward --local-port 2222 --serial <UDID> --remote-port 22
-```
-
-```bash
-# terminal 2
 make cfw_install
-# or: make cfw_install_jb        # jailbreak variant
+# or: make cfw_install_jb
 ```
 
 ## First Boot
@@ -173,7 +167,7 @@ shutdown -h now
 make boot
 ```
 
-In a separate terminal, start USBMux forwards:
+In a separate terminal, start any Swift USBMux forwards you still need:
 
 ```bash
 ./.build/debug/vphone-cli usbmux-forward --local-port 22222 --serial <UDID> --remote-port 22222
@@ -184,8 +178,8 @@ In a separate terminal, start USBMux forwards:
 
 Connect via:
 
-- **SSH (JB):** `ssh -p 2222 mobile@127.0.0.1` (password: `alpine`)
-- **SSH (Regular/Dev):** `ssh -p 2222 root@127.0.0.1` (password: `alpine`)
+- **SSH (JB):** `ssh -p 2222 mobile@127.0.0.1`
+- **SSH (Regular/Dev):** `ssh -p 2222 root@127.0.0.1`
 - **VNC:** `vnc://127.0.0.1:5901`
 - [**RPC:**](http://github.com/doronz88/rpc-project) `rpcclient -p 5910 127.0.0.1`
 

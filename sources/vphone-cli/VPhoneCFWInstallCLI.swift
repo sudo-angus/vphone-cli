@@ -725,7 +725,7 @@ private final class VPhoneCFWInstaller {
     }
 
     func resolveBootHash(in directory: String) async throws -> String {
-        let command = #"/bin/sh -c 'for entry in "# + directory + #"/"*; do name=${entry##*/}; [ ${#name} -eq 96 ] && { printf "%s\n" "$name"; exit 0; }; done; exit 1'"#
+        let command = "/bin/sh -c 'if [ -f \(directory)/active ]; then /bin/cat \(directory)/active && exit 0; fi; for entry in \(directory)/*; do name=${entry##*/}; case \"$name\" in active|Cryptexes) continue ;; esac; printf \"%s\\\\n\" \"$name\"; exit 0; done; exit 1'"
         let result = try await ssh(command, requireSuccess: false)
         let bootHash = result.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines)
         guard result.terminationStatus.isSuccess, !bootHash.isEmpty else {

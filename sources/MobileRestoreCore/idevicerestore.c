@@ -345,6 +345,55 @@ static void irecv_event_cb(const irecv_device_event_t* event, void *userdata)
 
 int build_identity_check_components_in_ipsw(plist_t build_identity, ipsw_archive_t ipsw);
 
+static void idevicerestore_prime_current_mode(struct idevicerestore_client_t* client)
+{
+	if (!client || client->mode != MODE_UNKNOWN) {
+		return;
+	}
+
+	if (client->ecid) {
+		irecv_client_t probe = NULL;
+		if (irecv_open_with_ecid_and_attempts(&probe, client->ecid, 1) == IRECV_E_SUCCESS) {
+			int mode = 0;
+			if (irecv_get_mode(probe, &mode) == IRECV_E_SUCCESS) {
+				switch (mode) {
+				case IRECV_K_WTF_MODE:
+					client->mode = MODE_WTF;
+					break;
+				case IRECV_K_DFU_MODE:
+					client->mode = MODE_DFU;
+					break;
+				case IRECV_K_PORT_DFU_MODE:
+					client->mode = MODE_PORTDFU;
+					break;
+				case IRECV_K_RECOVERY_MODE_1:
+				case IRECV_K_RECOVERY_MODE_2:
+				case IRECV_K_RECOVERY_MODE_3:
+				case IRECV_K_RECOVERY_MODE_4:
+					client->mode = MODE_RECOVERY;
+					break;
+				default:
+					break;
+				}
+				if (client->mode != MODE_UNKNOWN && !client->device) {
+					client->device = get_irecv_device(client);
+				}
+			}
+			irecv_close(probe);
+		}
+	}
+
+	if (client->mode == MODE_UNKNOWN && normal_check_mode(client) == 0) {
+		client->mode = MODE_NORMAL;
+	}
+	if (client->mode == MODE_UNKNOWN && client->ecid && restore_check_mode(client) == 0) {
+		client->mode = MODE_RESTORE;
+	}
+	if (client->mode != MODE_UNKNOWN) {
+		logger(LL_DEBUG, "Primed current device mode as %s before waiting for events\n", client->mode->string);
+	}
+}
+
 int idevicerestore_start(struct idevicerestore_client_t* client)
 {
 	int tss_enabled = 0;
@@ -390,6 +439,7 @@ int idevicerestore_start(struct idevicerestore_client_t* client)
 
 	// check which mode the device is currently in so we know where to start
 	mutex_lock(&client->device_event_mutex);
+	idevicerestore_prime_current_mode(client);
 	if (client->mode == MODE_UNKNOWN) {
 		cond_wait_timeout(&client->device_event_cond, &client->device_event_mutex, 10000);
 		if (client->mode == MODE_UNKNOWN || (client->flags & FLAG_QUIT)) {

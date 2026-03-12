@@ -16,6 +16,8 @@ struct SendRamdiskCLI: AsyncParsableCommand {
     @Option(name: .customLong("udid"), help: "Optional UDID for logging context.")
     var udid: String?
 
+    private static let ramdiskBootArguments = "serial=3 rd=md0 debug=0x2014e -v wdt=-1 nand-enable-reformat=1 -progress -restore"
+
     mutating func run() async throws {
         let env = ProcessInfo.processInfo.environment
         let udid = udid ?? env["RAMDISK_UDID"] ?? env["RESTORE_UDID"]
@@ -76,6 +78,7 @@ struct SendRamdiskCLI: AsyncParsableCommand {
 
         print("  [*] Booting kernel...")
         try recoverySession.sendFile(path: kernelURL.path)
+        try recoverySession.sendCommand("setenv boot-args \(Self.ramdiskBootArguments)")
         try recoverySession.usbControlTransfer(allowFailure: true)
         try recoverySession.sendCommandBreq("bootx")
 

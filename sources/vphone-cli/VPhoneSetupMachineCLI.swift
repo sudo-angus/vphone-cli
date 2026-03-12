@@ -184,10 +184,12 @@ private struct SetupMachineRunner {
             "--variant", variant.rawValue,
         ])
 
+        try await terminateConflictingVMProcesses()
         let dfu = try startBackgroundBoot(dfu: true, logURL: bootDFULog)
         defer { dfu.terminate() }
 
         let identity = try await waitForIdentity()
+        try waitForDFU(ecidHex: identity.ecid)
         try await runCLI("Restore", args: [
             "restore-get-shsh",
             vmDirectoryURL.path,
@@ -204,11 +206,17 @@ private struct SetupMachineRunner {
         dfu.terminate()
         try await Task.sleep(for: .seconds(5))
 
+        try await terminateConflictingVMProcesses()
         let ramdiskDFU = try startBackgroundBoot(dfu: true, logURL: bootDFULog)
         defer { ramdiskDFU.terminate() }
 
         let ramdiskIdentity = try await waitForIdentity()
-        try await runCLI("Ramdisk", args: ["build-ramdisk", vmDirectoryURL.path])
+        try waitForDFU(ecidHex: ramdiskIdentity.ecid)
+        try await runCLI(
+            "Ramdisk",
+            args: ["build-ramdisk", vmDirectoryURL.path],
+            environment: ["RAMDISK_UDID": ramdiskIdentity.udid]
+        )
         try await runCLI("Ramdisk", args: [
             "send-ramdisk",
             "--ramdisk-dir", vmDirectoryURL.appendingPathComponent("Ramdisk").path,
@@ -216,8 +224,9 @@ private struct SetupMachineRunner {
             "--ecid", "0x\(ramdiskIdentity.ecid)",
         ])
 
+        let usbmuxSerial = try await waitForUSBMuxSerial(preferred: ramdiskIdentity.udid)
         let forwardedPort = try chooseRandomPort()
-        let usbmux = try startUSBMuxForward(localPort: forwardedPort, serial: ramdiskIdentity.udid)
+        let usbmux = try startUSBMuxForward(localPort: forwardedPort, serial: usbmuxSerial)
         defer { usbmux.terminate() }
 
         try await waitForSSH(port: forwardedPort)
@@ -243,10 +252,15 @@ private struct SetupMachineRunner {
         print("[+] setup-machine complete")
     }
 
-    func runCLI(_ label: String, args: [String]) async throws {
+    func runCLI(_ label: String, args: [String], environment: [String: String?] = [:]) async throws {
         print("")
         print("=== \(label) ===")
-        let result = try await VPhoneHost.runCommand(patcherExecutable, arguments: args, requireSuccess: true)
+        let result = try await VPhoneHost.runCommand(
+            patcherExecutable,
+            arguments: args,
+            environment: environment,
+            requireSuccess: true
+        )
         if !result.standardOutput.isEmpty { print(result.standardOutput) }
         if !result.standardError.isEmpty { print(result.standardError) }
     }
@@ -255,6 +269,49 @@ private struct SetupMachineRunner {
         print("")
         print("=== Project build ===")
         _ = try await HostBuildSupport.buildHostBinary(projectRoot: projectRoot, configuration: .release)
+    }
+
+    func terminateConflictingVMProcesses() async throws {
+        let result = try await VPhoneHost.runCommand(
+            "/bin/ps",
+            arguments: ["-Ao", "pid=,command="],
+            requireSuccess: true
+        )
+        let currentPID = ProcessInfo.processInfo.processIdentifier
+        let configPath = configURL.path
+        let executablePath = releaseBinary.path
+
+        let pids = result.standardOutput
+            .split(separator: "\n")
+            .compactMap { line -> pid_t? in
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                guard !trimmed.isEmpty else { return nil }
+                let parts = trimmed.split(maxSplits: 1, whereSeparator: \.isWhitespace)
+                guard parts.count == 2, let pid = Int32(parts[0]) else { return nil }
+                let command = String(parts[1])
+                guard pid != currentPID else { return nil }
+                guard command.contains(executablePath), command.contains(configPath) else { return nil }
+                return pid
+            }
+
+        guard !pids.isEmpty else { return }
+
+        print("[*] Terminating \(pids.count) conflicting VM process(es) for \(configPath)")
+        for pid in pids {
+            _ = Darwin.kill(pid, SIGTERM)
+        }
+
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            if pids.allSatisfy({ Darwin.kill($0, 0) != 0 && errno == ESRCH }) {
+                return
+            }
+            try await Task.sleep(for: .milliseconds(200))
+        }
+
+        for pid in pids where Darwin.kill(pid, 0) == 0 {
+            _ = Darwin.kill(pid, SIGKILL)
+        }
     }
 
     func waitForIdentity(timeout: TimeInterval = 30) async throws -> (udid: String, ecid: String) {
@@ -287,6 +344,10 @@ private struct SetupMachineRunner {
 
     func startBackgroundBoot(dfu: Bool, logURL: URL) throws -> ManagedProcess {
         try Data().write(to: logURL)
+        let predictionFile = vmDirectoryURL.appendingPathComponent("udid-prediction.txt")
+        if FileManager.default.fileExists(atPath: predictionFile.path) {
+            try? FileManager.default.removeItem(at: predictionFile)
+        }
         let process = Process()
         process.currentDirectoryURL = projectRoot
         process.executableURL = releaseBinary
@@ -409,6 +470,46 @@ private struct SetupMachineRunner {
             if isPortFree(port) { return port }
         }
         throw ValidationError("Failed to allocate a random local SSH forward port")
+    }
+
+    func waitForDFU(ecidHex: String, timeout: TimeInterval = 30) throws {
+        guard let ecid = UInt64(ecidHex, radix: 16) else {
+            throw ValidationError("Invalid ECID for DFU wait: \(ecidHex)")
+        }
+        try VPhoneIRecovery.waitForDFU(ecid: ecid, timeout: timeout)
+    }
+
+    func waitForUSBMuxSerial(preferred: String, timeout: TimeInterval = 45) async throws -> String {
+        let deadline = Date().addingTimeInterval(timeout)
+        let fallback = "restored_external"
+
+        while Date() < deadline {
+            if let serial = try? resolveUSBMuxSerial(preferred: preferred, fallback: fallback) {
+                print("[+] USBMux device ready: \(serial)")
+                return serial
+            }
+            try await Task.sleep(for: .seconds(1))
+        }
+
+        throw ValidationError("Timed out waiting for a USBMux device matching '\(preferred)' or '\(fallback)'")
+    }
+
+    func resolveUSBMuxSerial(preferred: String, fallback: String) throws -> String {
+        let devices = try USBMuxClient.listDevices().filter { device in
+            (device.connectionType ?? "").caseInsensitiveCompare("network") != .orderedSame
+        }
+
+        if let exact = devices.first(where: { $0.serialNumber.caseInsensitiveCompare(preferred) == .orderedSame }) {
+            return exact.serialNumber
+        }
+        if let partial = devices.first(where: { $0.serialNumber.localizedCaseInsensitiveContains(preferred) }) {
+            return partial.serialNumber
+        }
+        if let fallbackDevice = devices.first(where: { $0.serialNumber.localizedCaseInsensitiveContains(fallback) }) {
+            return fallbackDevice.serialNumber
+        }
+
+        throw USBMuxError.deviceNotFound("No ramdisk USBMux device is visible yet")
     }
 
     func isPortFree(_ port: Int) -> Bool {

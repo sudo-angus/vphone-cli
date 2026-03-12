@@ -156,11 +156,11 @@ enum VPhoneArchive {
             return ZSTD_getFrameContentSize(source, rawBuffer.count)
         }
 
-        guard expectedSize != ZSTD_CONTENTSIZE_UNKNOWN else {
-            throw VPhoneArchiveError.zstd("unknown decompressed size")
-        }
         guard expectedSize != ZSTD_CONTENTSIZE_ERROR else {
             throw VPhoneArchiveError.zstd("invalid zstd frame")
+        }
+        if expectedSize == ZSTD_CONTENTSIZE_UNKNOWN {
+            return try decompressZstdStreaming(compressedData)
         }
         guard expectedSize <= UInt64(Int.max) else {
             throw VPhoneArchiveError.zstd("decompressed size too large")
@@ -182,6 +182,60 @@ enum VPhoneArchive {
         if writtenCount != output.count {
             output.removeSubrange(writtenCount...)
         }
+        return output
+    }
+
+    static func decompressZstdStreaming(_ compressedData: Data) throws -> Data {
+        guard let stream = ZSTD_createDStream() else {
+            throw VPhoneArchiveError.zstd("failed to create zstd stream")
+        }
+        defer { ZSTD_freeDStream(stream) }
+
+        let initResult = ZSTD_initDStream(stream)
+        if ZSTD_isError(initResult) != 0 {
+            throw VPhoneArchiveError.zstd(String(cString: ZSTD_getErrorName(initResult)))
+        }
+
+        let chunkSize = max(Int(ZSTD_DStreamOutSize()), 64 * 1024)
+        var output = Data()
+        var remaining = size_t(1)
+
+        try compressedData.withUnsafeBytes { inputBuffer in
+            guard let inputBase = inputBuffer.baseAddress else {
+                throw VPhoneArchiveError.zstd("missing compressed input")
+            }
+
+            var input = ZSTD_inBuffer(
+                src: UnsafeMutableRawPointer(mutating: inputBase),
+                size: inputBuffer.count,
+                pos: 0
+            )
+
+            while input.pos < input.size || remaining != 0 {
+                var chunk = Data(count: chunkSize)
+                let produced = try chunk.withUnsafeMutableBytes { outputBuffer -> Int in
+                    guard let outputBase = outputBuffer.baseAddress else {
+                        throw VPhoneArchiveError.zstd("missing output buffer")
+                    }
+
+                    var outputState = ZSTD_outBuffer(dst: outputBase, size: outputBuffer.count, pos: 0)
+                    remaining = ZSTD_decompressStream(stream, &outputState, &input)
+                    if ZSTD_isError(remaining) != 0 {
+                        throw VPhoneArchiveError.zstd(String(cString: ZSTD_getErrorName(remaining)))
+                    }
+                    return outputState.pos
+                }
+
+                if produced > 0 {
+                    output.append(chunk.prefix(produced))
+                } else if input.pos >= input.size, remaining == 0 {
+                    break
+                } else if input.pos >= input.size {
+                    throw VPhoneArchiveError.zstd("truncated zstd stream")
+                }
+            }
+        }
+
         return output
     }
 

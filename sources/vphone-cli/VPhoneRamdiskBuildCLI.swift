@@ -1,4 +1,5 @@
 import ArgumentParser
+import Compression
 import FirmwarePatcher
 import Foundation
 import Img4tool
@@ -305,11 +306,92 @@ private extension BuildRamdiskCLI {
     }
 
     func createCompressedIM4P(fourcc: String, description: String, payload: Data, originalRaw: Data?) throws -> Data {
-        let rebuilt = try IM4P(fourcc: fourcc, description: description, payload: payload, compression: "lzfse").data
+        let compressedPayload = try compressIBootLZFSE(payload)
+        let compressionInfo = derSequence([
+            derInteger(1),
+            derInteger(UInt64(payload.count)),
+        ])
+        let rebuilt = derSequence([
+            derIA5String("IM4P"),
+            derIA5String(fourcc),
+            derIA5String(description),
+            derOctetString(compressedPayload),
+            compressionInfo,
+        ])
         guard let originalRaw else {
             return rebuilt
         }
         return try appendPAYPIfPresent(from: originalRaw, to: rebuilt)
+    }
+
+    func compressIBootLZFSE(_ payload: Data) throws -> Data {
+        let algorithm = compression_algorithm(rawValue: 2193)
+        let bufferSize = max(payload.count + 1024, 4096)
+        var output = Data(count: bufferSize)
+        let compressedSize = output.withUnsafeMutableBytes { outputBuffer in
+            payload.withUnsafeBytes { inputBuffer in
+                compression_encode_buffer(
+                    outputBuffer.baseAddress!.assumingMemoryBound(to: UInt8.self),
+                    bufferSize,
+                    inputBuffer.baseAddress!.assumingMemoryBound(to: UInt8.self),
+                    payload.count,
+                    nil,
+                    algorithm
+                )
+            }
+        }
+        guard compressedSize > 0 else {
+            throw Img4Error.operationFailed("iBoot LZFSE compression failed")
+        }
+        output.count = compressedSize
+        return output
+    }
+
+    func derSequence(_ elements: [Data]) -> Data {
+        let content = elements.reduce(into: Data()) { $0.append($1) }
+        return Data([0x30]) + derLength(content.count) + content
+    }
+
+    func derIA5String(_ value: String) -> Data {
+        let bytes = Data(value.utf8)
+        return Data([0x16]) + derLength(bytes.count) + bytes
+    }
+
+    func derOctetString(_ value: Data) -> Data {
+        Data([0x04]) + derLength(value.count) + value
+    }
+
+    func derInteger(_ value: UInt64) -> Data {
+        if value == 0 {
+            return Data([0x02, 0x01, 0x00])
+        }
+
+        var number = value
+        var bytes: [UInt8] = []
+        while number > 0 {
+            bytes.insert(UInt8(number & 0xFF), at: 0)
+            number >>= 8
+        }
+        if let first = bytes.first, first & 0x80 != 0 {
+            bytes.insert(0x00, at: 0)
+        }
+        return Data([0x02]) + derLength(bytes.count) + Data(bytes)
+    }
+
+    func derLength(_ count: Int) -> Data {
+        if count < 0x80 {
+            return Data([UInt8(count)])
+        }
+        if count < 0x100 {
+            return Data([0x81, UInt8(count)])
+        }
+        if count < 0x10000 {
+            return Data([0x82, UInt8(count >> 8), UInt8(count & 0xFF)])
+        }
+        if count < 0x1000000 {
+            return Data([0x83, UInt8(count >> 16), UInt8((count >> 8) & 0xFF), UInt8(count & 0xFF)])
+        }
+        return Data([0x84, UInt8(count >> 24), UInt8((count >> 16) & 0xFF), UInt8((count >> 8) & 0xFF), UInt8(count & 0xFF)])
     }
 
     func appendPAYPIfPresent(from original: Data, to rebuilt: Data) throws -> Data {
@@ -497,10 +579,20 @@ private extension BuildRamdiskCLI {
         }
         print("  deriving ramdisk kernel from pristine source: \(pristine.path)")
         let outURL = tempDirectory.appendingPathComponent("kernelcache.research.vphone600\(Self.ramdiskKernelSuffix)")
-        let (payload, _, _) = try loadPayloadAndOriginal(from: pristine)
+        let (payload, originalRaw, im4p) = try loadPayloadAndOriginal(from: pristine)
         let patcher = KernelPatcher(data: payload, verbose: false)
         _ = try patcher.apply()
-        try patcher.buffer.data.write(to: outURL)
+        if let im4p {
+            let rebuilt = try createCompressedIM4P(
+                fourcc: im4p.fourcc,
+                description: "",
+                payload: patcher.buffer.data,
+                originalRaw: originalRaw
+            )
+            try rebuilt.write(to: outURL)
+        } else {
+            try patcher.buffer.data.write(to: outURL)
+        }
         print("  [+] base kernel patches applied for ramdisk variant")
         return outURL
     }
@@ -529,7 +621,7 @@ private extension BuildRamdiskCLI {
         let (payload, originalRaw, _) = try loadPayloadAndOriginal(from: sourceURL)
         let rebuilt = try createCompressedIM4P(
             fourcc: Self.kernelFourCC,
-            description: Self.kernelFourCC,
+            description: "",
             payload: payload,
             originalRaw: originalRaw
         )

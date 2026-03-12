@@ -226,6 +226,10 @@
   - Swift now rebuilds IM4Ps in the same effective shape as the Python patch flow and only preserves trailing `PAYP` metadata for `TXM` (`trxm`) and `kernelcache` (`krnl`).
   - `IBootPatcher` serial labels now match Python casing exactly (`Loaded iBSS`, `Loaded iBEC`, `Loaded LLB`).
   - `DeviceTreePatcher` now serializes the full patched flat tree, matching Python `dtree.py`, instead of relying on in-place property writes alone.
+- Host automation migration status on 2026-03-13:
+  - public host workflow is now driven by Swift CLI subcommands plus `make` targets; the legacy host-side Python and shell entrypoints are no longer required for `setup_machine`, `fw_prepare`, `ramdisk_build`, `ramdisk_send`, `cfw_install`, or USBMux forwarding.
+  - host-side archive handling now uses `SWCompression` plus vendored `zstd`; plist mutation uses Foundation property lists; SSH/SCP transport uses the system `ssh` client behind the Swift CLI; git metadata resolution is handled natively from `.git`.
+  - `ramdisk_build` now emits a `254m` restore ramdisk again, matching the known-good historical script behavior, and the rebuilt `ramdisk.img4` / `send-ramdisk` path was revalidated on 2026-03-13.
 - Synthetic CLI dry-run status on 2026-03-10 using IM4P-backed inputs under `ipsws/patch_refactor_input`:
   - regular: 58 patch records
   - dev: 69 patch records

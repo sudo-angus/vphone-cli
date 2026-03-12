@@ -48,14 +48,21 @@ enum VPhoneIRecovery {
     }
 
     static func waitForRecovery(ecid: UInt64?, timeout: TimeInterval = 20) throws {
-        let milliseconds = max(Int(timeout * 1000.0), 0)
-        let result = vphone_irecv_wait_for_mode(
-            ecid ?? 0,
-            ecid == nil ? 0 : 1,
-            Int32(VPHONE_IRECV_MODE_RECOVERY),
-            Int32(milliseconds)
+        try waitForMode(
+            ecid: ecid,
+            mode: Int32(VPHONE_IRECV_MODE_RECOVERY),
+            timeout: timeout,
+            action: "wait for recovery mode"
         )
-        try requireSuccess(result, action: "wait for recovery mode")
+    }
+
+    static func waitForDFU(ecid: UInt64?, timeout: TimeInterval = 20) throws {
+        try waitForMode(
+            ecid: ecid,
+            mode: Int32(VPHONE_IRECV_MODE_DFU),
+            timeout: timeout,
+            action: "wait for DFU mode"
+        )
     }
 
     static func openRecoverySession(ecid: UInt64?, attempts: Int32 = 10) throws -> RecoverySession {
@@ -72,6 +79,19 @@ enum VPhoneIRecovery {
             throw VPhoneHostError.invalidArgument("open recovery session failed for an unknown reason")
         }
         return RecoverySession(handle: handle)
+    }
+}
+
+private extension VPhoneIRecovery {
+    static func waitForMode(ecid: UInt64?, mode: Int32, timeout: TimeInterval, action: String) throws {
+        let milliseconds = max(Int(timeout * 1000.0), 0)
+        let result = vphone_irecv_wait_for_mode(
+            ecid ?? 0,
+            ecid == nil ? 0 : 1,
+            mode,
+            Int32(milliseconds)
+        )
+        try requireSuccess(result, action: action)
     }
 }
 
