@@ -183,27 +183,33 @@ NSDictionary *vp_handle_apps_command(NSDictionary *msg) {
       return r;
     }
 
+    // Try FBSSystemService first
     if (gFBSSystemServiceClass) {
       id service = ((id (*)(Class, SEL))objc_msgSend)(
           gFBSSystemServiceClass, sel_registerName("sharedService"));
       if (service) {
-        // terminateApplication:forReason:andReport:withDescription:
-        // reason 5 = user requested, report NO
         ((void (*)(id, SEL, id, int, BOOL, id))objc_msgSend)(
             service,
             sel_registerName(
                 "terminateApplication:forReason:andReport:withDescription:"),
             bundleID, 5, NO, @"vphoned terminate request");
+        usleep(500000); // 500ms for termination to take effect
       }
-    } else {
-      // Fallback: kill by PID
-      pid_t pid = pid_for_app(bundleID);
-      if (pid > 0)
-        kill(pid, SIGTERM);
+    }
+
+    // Check if still alive; fall back to SIGTERM if needed
+    pid_t pid = pid_for_app(bundleID);
+    if (pid > 0) {
+      kill(pid, SIGTERM);
+      usleep(300000); // 300ms
+      pid = pid_for_app(bundleID);
     }
 
     NSMutableDictionary *r = vp_make_response(@"app_terminate", reqId);
-    r[@"ok"] = @YES;
+    r[@"ok"] = @(pid <= 0);
+    if (pid > 0) {
+      r[@"error"] = @"process still running after terminate attempts";
+    }
     return r;
   }
 
