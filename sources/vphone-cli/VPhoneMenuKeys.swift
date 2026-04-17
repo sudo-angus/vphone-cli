@@ -15,6 +15,12 @@ extension VPhoneMenuController {
         menu.addItem(makeItem("Spotlight (Cmd+Space)", action: #selector(sendSpotlight)))
         menu.addItem(NSMenuItem.separator())
         menu.addItem(makeItem("Send Host Clipboard to Guest", action: #selector(sendHostClipboardToGuest)))
+        let typeItem = makeItem("Type ASCII from Clipboard", action: #selector(typeFromClipboard))
+        if !keyHelper.hasHardwareKeyboard {
+            typeItem.isEnabled = false
+            typeItem.toolTip = "Requires the hardware keyboard (disabled by --software-keyboard)."
+        }
+        menu.addItem(typeItem)
         menu.addItem(NSMenuItem.separator())
         let tidItem = makeItem("Touch ID Home Forwarding", action: #selector(toggleTouchIDForwarding))
         if hasTouchID {
@@ -48,6 +54,10 @@ extension VPhoneMenuController {
 
     @objc func sendSpotlight() {
         keyHelper.sendSpotlight()
+    }
+
+    @objc func typeFromClipboard() {
+        keyHelper.typeFromClipboard()
     }
 
     @objc func sendHostClipboardToGuest() {
