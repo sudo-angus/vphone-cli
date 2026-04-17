@@ -13,3 +13,7 @@ BOOL vp_apps_load(void);
 
 /// Handle an app command. Returns a response dict.
 NSDictionary *vp_handle_apps_command(NSDictionary *msg);
+
+/// Terminate a running app by bundle ID. Best-effort: tries FBSSystemService, then SIGTERM.
+/// Returns YES if the app is no longer running after the attempt.
+BOOL vp_terminate_app(NSString *bundleID);

@@ -80,6 +80,39 @@ static NSString *state_for_pid(pid_t pid) {
   return @"not_running";
 }
 
+// MARK: - Terminate Helper
+
+BOOL vp_terminate_app(NSString *bundleID) {
+  if (!bundleID.length || !gAppsLoaded)
+    return YES;
+
+  pid_t pid = pid_for_app(bundleID);
+  if (pid <= 0)
+    return YES;
+
+  if (gFBSSystemServiceClass) {
+    id service = ((id (*)(Class, SEL))objc_msgSend)(
+        gFBSSystemServiceClass, sel_registerName("sharedService"));
+    if (service) {
+      ((void (*)(id, SEL, id, int, BOOL, id))objc_msgSend)(
+          service,
+          sel_registerName(
+              "terminateApplication:forReason:andReport:withDescription:"),
+          bundleID, 5, NO, @"vphoned reinstall");
+      usleep(500000);
+    }
+  }
+
+  pid = pid_for_app(bundleID);
+  if (pid > 0) {
+    kill(pid, SIGTERM);
+    usleep(300000);
+    pid = pid_for_app(bundleID);
+  }
+
+  return pid <= 0;
+}
+
 // MARK: - Command Handler
 
 NSDictionary *vp_handle_apps_command(NSDictionary *msg) {
@@ -183,31 +216,11 @@ NSDictionary *vp_handle_apps_command(NSDictionary *msg) {
       return r;
     }
 
-    // Try FBSSystemService first
-    if (gFBSSystemServiceClass) {
-      id service = ((id (*)(Class, SEL))objc_msgSend)(
-          gFBSSystemServiceClass, sel_registerName("sharedService"));
-      if (service) {
-        ((void (*)(id, SEL, id, int, BOOL, id))objc_msgSend)(
-            service,
-            sel_registerName(
-                "terminateApplication:forReason:andReport:withDescription:"),
-            bundleID, 5, NO, @"vphoned terminate request");
-        usleep(500000); // 500ms for termination to take effect
-      }
-    }
-
-    // Check if still alive; fall back to SIGTERM if needed
-    pid_t pid = pid_for_app(bundleID);
-    if (pid > 0) {
-      kill(pid, SIGTERM);
-      usleep(300000); // 300ms
-      pid = pid_for_app(bundleID);
-    }
+    BOOL terminated = vp_terminate_app(bundleID);
 
     NSMutableDictionary *r = vp_make_response(@"app_terminate", reqId);
-    r[@"ok"] = @(pid <= 0);
-    if (pid > 0) {
+    r[@"ok"] = @(terminated);
+    if (!terminated) {
       r[@"error"] = @"process still running after terminate attempts";
     }
     return r;
