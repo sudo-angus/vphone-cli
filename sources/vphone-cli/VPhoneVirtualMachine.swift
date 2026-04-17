@@ -35,6 +35,7 @@ class VPhoneVirtualMachine: NSObject, VZVirtualMachineDelegate {
         var screenScale: Double = 3.0
         var kernelDebugPort: Int?
         var variant: Variant
+        var softwareKeyboard: Bool = false
     }
 
     private struct DeviceIdentity {
@@ -222,7 +223,12 @@ class VPhoneVirtualMachine: NSObject, VZVirtualMachineDelegate {
             print("[vphone] USB touch screen configured")
         }
 
-        config.keyboards = [VZUSBKeyboardConfiguration()]
+        if options.softwareKeyboard {
+            config.keyboards = []
+            print("[vphone] Hardware keyboard disabled (software keyboard mode)")
+        } else {
+            config.keyboards = [VZUSBKeyboardConfiguration()]
+        }
 
         // Vsock (host <-> guest control channel, no IP/TCP involved)
         config.socketDevices = [VZVirtioSocketDeviceConfiguration()]

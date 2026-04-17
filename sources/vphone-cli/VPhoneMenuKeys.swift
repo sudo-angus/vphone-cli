@@ -14,7 +14,7 @@ extension VPhoneMenuController {
         menu.addItem(NSMenuItem.separator())
         menu.addItem(makeItem("Spotlight (Cmd+Space)", action: #selector(sendSpotlight)))
         menu.addItem(NSMenuItem.separator())
-        menu.addItem(makeItem("Type ASCII from Clipboard", action: #selector(typeFromClipboard)))
+        menu.addItem(makeItem("Send Host Clipboard to Guest", action: #selector(sendHostClipboardToGuest)))
         menu.addItem(NSMenuItem.separator())
         let tidItem = makeItem("Touch ID Home Forwarding", action: #selector(toggleTouchIDForwarding))
         if hasTouchID {
@@ -50,8 +50,23 @@ extension VPhoneMenuController {
         keyHelper.sendSpotlight()
     }
 
-    @objc func typeFromClipboard() {
-        keyHelper.typeFromClipboard()
+    @objc func sendHostClipboardToGuest() {
+        guard let text = NSPasteboard.general.string(forType: .string), !text.isEmpty else {
+            showAlert(title: "Clipboard", message: "Host clipboard has no text.", style: .warning)
+            return
+        }
+        Task {
+            do {
+                try await control.clipboardSet(text: text)
+                showAlert(
+                    title: "Clipboard",
+                    message: "Sent \(text.count) characters to guest clipboard. Long-press in the target field to paste.",
+                    style: .informational
+                )
+            } catch {
+                showAlert(title: "Clipboard", message: "\(error)", style: .warning)
+            }
+        }
     }
 
     @objc func toggleTouchIDForwarding() {
