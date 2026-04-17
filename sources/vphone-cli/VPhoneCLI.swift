@@ -47,6 +47,9 @@ struct VPhoneBootCLI: ParsableCommand {
     @Option(help: "Firmware variant to execute.")
     var variant: PatchFirmwareCLI.VariantOption = .regular
 
+    @Flag(help: "Do not attach a USB keyboard device so the iOS software keyboard appears")
+    var softwareKeyboard: Bool = false
+
     @Option(
         help: "Automatically install the given IPA/TIPA after the guest control channel connects. Unavailable with --dfu.",
         transform: URL.init(fileURLWithPath:)
@@ -103,7 +106,8 @@ struct VPhoneBootCLI: ParsableCommand {
             screenPPI: manifest.screenConfig.pixelsPerInch,
             screenScale: manifest.screenConfig.scale,
             kernelDebugPort: kernelDebugPort,
-            variant: variant.virtualMachineVariant
+            variant: variant.virtualMachineVariant,
+            softwareKeyboard: softwareKeyboard
         )
     }
 
