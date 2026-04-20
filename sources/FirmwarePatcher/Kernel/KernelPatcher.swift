@@ -46,7 +46,7 @@ public final class KernelPatcher: KernelPatcherBase, Patcher {
 
         // Dev-only patches (not applied to regular or JB variants)
         if isDev {
-            patchExcGuardBehavior() // 27 (dev only)
+            patchExcGuardBehavior() // 26 (dev only)
         }
 
         return patches
