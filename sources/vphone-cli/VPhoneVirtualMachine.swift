@@ -36,6 +36,7 @@ class VPhoneVirtualMachine: NSObject, VZVirtualMachineDelegate {
         var kernelDebugPort: Int?
         var variant: Variant
         var softwareKeyboard: Bool = false
+        var noVphoned: Bool
     }
 
     private struct DeviceIdentity {
@@ -216,12 +217,22 @@ class VPhoneVirtualMachine: NSObject, VZVirtualMachineDelegate {
             config.serialPorts = [serialPort]
             print("[vphone] PL011 serial port attached (interactive)")
         }
+        
+        if let obj1 = Dynamic._VZMacVideoToolboxDeviceConfiguration().asObject,
+           let obj2 = Dynamic._VZMacNeuralEngineDeviceConfiguration().asObject {
+            Dynamic(config)._setAcceleratorDevices([obj1,obj2])
+            print("[vphone] Accelerator devices configured")
+        }
 
         // Multi-touch (USB touch screen)
         if let obj = Dynamic._VZUSBTouchScreenConfiguration().asObject {
             Dynamic(config)._setMultiTouchDevices([obj])
             print("[vphone] USB touch screen configured")
         }
+        
+        let obj = VZVirtioEntropyDeviceConfiguration()
+        config.entropyDevices = [obj]
+        print("[vphone] Entropy device configured")
 
         if options.softwareKeyboard {
             config.keyboards = []
@@ -230,8 +241,10 @@ class VPhoneVirtualMachine: NSObject, VZVirtualMachineDelegate {
             config.keyboards = [VZUSBKeyboardConfiguration()]
         }
 
-        // Vsock (host <-> guest control channel, no IP/TCP involved)
-        config.socketDevices = [VZVirtioSocketDeviceConfiguration()]
+        if !options.noVphoned {
+            // Vsock (host <-> guest control channel, no IP/TCP involved)
+            config.socketDevices = [VZVirtioSocketDeviceConfiguration()]
+        }
 
         // Power source (synthetic battery - guest sees full charge, charging)
         let source = Dynamic._VZMacSyntheticBatterySource()

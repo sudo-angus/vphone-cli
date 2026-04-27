@@ -52,10 +52,14 @@ IPROXY_RESOLVE_REASON=""
 BOOT_ANALYSIS_TIMEOUT="${BOOT_ANALYSIS_TIMEOUT:-300}"
 BOOT_PROMPT_FALLBACK_TIMEOUT="${BOOT_PROMPT_FALLBACK_TIMEOUT:-60}"
 BOOT_BASH_PROMPT_REGEX="${BOOT_BASH_PROMPT_REGEX:-bash-[0-9]+(\.[0-9]+)+#}"
-BOOT_PANIC_REGEX="${BOOT_PANIC_REGEX:-panic|kernel panic|panic\\.apple\\.com|stackshot succeeded}"
+BOOT_PANIC_REGEX="${BOOT_PANIC_REGEX:-(^|[^p])(panic|kernel panic|panic\\.apple\\.com|stackshot succeeded)}"
 PMD3_BRIDGE="${PMD3_BRIDGE:-${PROJECT_ROOT}/scripts/pymobiledevice3_bridge.py}"
 NONE_INTERACTIVE_RAW="${NONE_INTERACTIVE:-0}"
 NONE_INTERACTIVE=0
+NO_BINPACK_RAW="${NO_BINPACK:-0}"
+NO_BINPACK=0
+NO_VPHONED_RAW="${NO_VPHONED:-0}"
+NO_VPHONED=0
 JB_MODE=0
 DEV_MODE=0
 LESS_MODE=0
@@ -744,9 +748,9 @@ run_make_sudo() {
   echo ""
   echo "=== ${label} ==="
   if [[ -n "${SUDO_PASSWORD:-}" ]]; then
-    sudo -A -- make "$@"
+    sudo -A -E -- make "$@"
   else
-    sudo -- make "$@"
+    sudo -E -- make "$@"
   fi
 }
 
@@ -977,6 +981,8 @@ Options:
 Environment:
   NONE_INTERACTIVE=1      Auto-continue first-boot prompts + run final boot analysis.
   SUDO_PASSWORD=...       Preload sudo credential via askpass.
+  NO_BINPACK=1            Excludes the SSH, VNC, ... binaries from being installed (patchless-only, currently)
+  NO_VPHONED=1            Excludes vphoned from being installed (patchless-only, currently)
 EOF
         exit 0
         ;;
@@ -991,6 +997,12 @@ main() {
   parse_args "$@"
   if parse_bool "$NONE_INTERACTIVE_RAW"; then
     NONE_INTERACTIVE=1
+  fi
+  if parse_bool "$NO_BINPACK_RAW"; then
+    NO_BINPACK=1
+  fi
+  if parse_bool "$NO_VPHONED_RAW"; then
+    NO_VPHONED=1
   fi
   setup_sudo_noninteractive
 
@@ -1016,7 +1028,7 @@ main() {
     mode_label="less"
   fi
 
-  echo "[*] setup_machine mode: ${mode_label}, project_setup=$([[ "$SKIP_PROJECT_SETUP" -eq 1 ]] && echo "skip" || echo "run"), non_interactive=${NONE_INTERACTIVE}"
+  echo "[*] setup_machine mode: ${mode_label}, project_setup=$([[ "$SKIP_PROJECT_SETUP" -eq 1 ]] && echo "skip" || echo "run"), non_interactive=${NONE_INTERACTIVE}, no_binpack=${NO_BINPACK}, no_vphoned=${NO_VPHONED}"
 
   if [[ "$SKIP_PROJECT_SETUP" -eq 1 ]]; then
     echo ""
@@ -1076,7 +1088,9 @@ main() {
     run_make "CFW install" "$cfw_install_target" SSH_PORT="$RAMDISK_SSH_PORT"
     stop_boot_dfu
     stop_iproxy
+  fi
 
+  if [[ "$LESS_MODE" -eq 0 || "$NO_BINPACK" -eq 0 ]]; then
     echo ""
     echo "=== First boot ==="
     if [[ "$NONE_INTERACTIVE" -eq 0 ]]; then

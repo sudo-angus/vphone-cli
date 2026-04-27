@@ -46,9 +46,12 @@ help:
 	@echo "  make setup_machine                   Full setup through First Boot"
 	@echo "    Options: JB=1                      Jailbreak firmware/CFW path"
 	@echo "             DEV=1                     Dev firmware/CFW path (dev TXM + cfw_install_dev)"
+	@echo "             LESS=1                    Build, keeping iOS security mitigations enabled. 
 	@echo "             SKIP_PROJECT_SETUP=1      Skip setup_tools/build"
 	@echo "             NONE_INTERACTIVE=1        Auto-continue prompts + boot analysis"
 	@echo "             SUDO_PASSWORD=...         Preload sudo credential for setup flow"
+	@echo "             NO_BINPACK=1              Excludes the SSH, VNC, ... binaries from being installed (patchless-only, currently)"
+	@echo "             NO_VPHONED=1              Excludes vphoned from being installed (patchless-only, currently)"
 	@echo ""
 	@echo "Setup (one-time):"
 	@echo "  make setup_tools             Install all tools (brew, trustcache, insert_dylib, venv+pymobiledevice3)"
@@ -74,6 +77,7 @@ help:
 	@echo "  make boot_host_preflight     Diagnose whether host can launch signed PV=3 binary"
 	@echo "  make boot                    Boot VM (reads from config.plist)"
 	@echo "  make boot_less               Boot VM in vphoned patchless compatibility"
+	@echo "    Options: NO_VPHONED=1              Excludes vphoned from being installed"
 	@echo "  make boot_dfu                Boot VM in DFU mode (reads from config.plist)"
 	@echo ""
 	@echo "Firmware pipeline:"
@@ -86,12 +90,15 @@ help:
 	@echo "             CLOUDOS_SOURCE=   URL or local path to cloudOS IPSW"
 	@echo "  make fw_patch                Patch boot chain with Swift pipeline (regular variant)"
 	@echo "  make fw_patch_less           Patch boot chain with Swift pipeline (less patches)"
+	@echo "    Options: NO_BINPACK=1              Excludes the SSH, VNC, ... binaries from being installed"
+	@echo "             NO_VPHONED=1              Excludes vphoned from being installed"
 	@echo "  make fw_patch_dev            Patch boot chain with Swift pipeline (dev mode TXM patches)"
 	@echo "  make fw_patch_jb             Patch boot chain with Swift pipeline (dev + JB extensions)"
 	@echo ""
 	@echo "Restore:"
 	@echo "  make restore_get_shsh        Dump SHSH response from Apple"
 	@echo "  make restore                 Restore to device (pymobiledevice3 backend)"
+	@echo "  make restore_offline         Restore offline — decrypts AEA images in place, uses cached .shsh blob"
 	@echo ""
 	@echo "Ramdisk:"
 	@echo "  make ramdisk_build           Build signed SSH ramdisk"
@@ -121,6 +128,8 @@ setup_machine:
 	fi
 	SUDO_PASSWORD="$(SUDO_PASSWORD)" \
 	NONE_INTERACTIVE="$(NONE_INTERACTIVE)" \
+	NO_BINPACK="$(NO_BINPACK)" \
+	NO_VPHONED="$(NO_VPHONED)" \
 	zsh $(SCRIPTS)/setup_machine.sh \
 		$(if $(filter 1 true yes YES TRUE,$(JB)),--jb,) \
 		$(if $(filter 1 true yes YES TRUE,$(DEV)),--dev,) \
@@ -228,7 +237,7 @@ vm_list:
 			fi; \
 			found=1; \
 		done; \
-		[ "$$found" = "0" ] && echo "  (no backups yet — run: make vm_backup NAME=<name>)"; \
+		if [ "$$found" = "0" ]; then echo "  (no backups yet — run: make vm_backup NAME=<name>)"; fi; \
 	else \
 		echo "  (no backups yet — run: make vm_backup NAME=<name>)"; \
 	fi
@@ -272,7 +281,9 @@ boot: bundle vphoned boot_binary_check
 
 boot_less: bundle vphoned boot_binary_check_less
 	cd $(VM_DIR) && "$(CURDIR)/$(BUNDLE_BIN)" \
-		--config ./config.plist --variant less
+		--config ./config.plist \
+		--variant less \
+		$(if $(filter 1 true yes YES TRUE,$(NO_VPHONED)),--no-vphoned,)
 
 boot_dfu: build boot_binary_check
 	cd $(VM_DIR) && "$(CURDIR)/$(BINARY)" \
@@ -291,12 +302,18 @@ fw_prepare:
 fw_patch: patcher_build
 	"$(CURDIR)/$(PATCHER_BINARY)" patch-firmware --vm-directory "$(CURDIR)/$(VM_DIR)" --variant regular
 
+UID := $(shell id -u)
+ifeq ($(UID),0)
 fw_patch_less: patcher_build
-	@sh -c 'if [ "$$(id -u)" -ne 0 ]; then \
-		echo "fw_patch_less must be run via sudo" >&2; \
-		exit 1; \
-	fi; \
-	"$(CURDIR)/$(PATCHER_BINARY)" patch-firmware --vm-directory "$(CURDIR)/$(VM_DIR)" --variant less'
+	"$(CURDIR)/$(PATCHER_BINARY)" patch-firmware --vm-directory "$(CURDIR)/$(VM_DIR)" \
+	--variant less \
+	$(if $(filter 1 true yes YES TRUE,$(NO_BINPACK)),--no-binpack,)
+	$(if $(filter 1 true yes YES TRUE,$(NO_VPHONED)),--no-vphoned,)
+else
+fw_patch_less:
+	@echo "fw_patch_less must be run via sudo"
+	@exit 1
+endif
 
 fw_patch_dev: patcher_build
 	"$(CURDIR)/$(PATCHER_BINARY)" patch-firmware --vm-directory "$(CURDIR)/$(VM_DIR)" --variant dev
@@ -308,19 +325,71 @@ fw_patch_jb: patcher_build
 # Restore
 # ═══════════════════════════════════════════════════════════════════
 
-.PHONY: restore_get_shsh restore
+.PHONY: restore_get_shsh restore restore_offline
+
+# Resolve ECID from RESTORE_ECID or vm/udid-prediction.txt (written by boot_dfu).
+define _resolve_ecid
+	if [ -n "$(RESTORE_ECID)" ]; then \
+		ECID="$(RESTORE_ECID)"; \
+	elif [ -f "$(CURDIR)/$(VM_DIR)/udid-prediction.txt" ]; then \
+		ECID=$$(grep '^ECID=' "$(CURDIR)/$(VM_DIR)/udid-prediction.txt" | head -1 | cut -d= -f2); \
+	fi; \
+	if [ -z "$$ECID" ]; then \
+		echo "[-] Cannot resolve ECID — set RESTORE_ECID or run 'make boot_dfu' first"; \
+		exit 1; \
+	fi
+endef
 
 restore_get_shsh:
-	cd $(VM_DIR) && "$(PYTHON)" "$(PMD3_BRIDGE)" restore-get-shsh \
+	@$(call _resolve_ecid); \
+	cd "$(VM_DIR)" && "$(PYTHON)" "$(PMD3_BRIDGE)" restore-get-shsh \
 		--vm-dir . \
 		$(if $(RESTORE_UDID),--udid $(RESTORE_UDID),) \
-		$(if $(RESTORE_ECID),--ecid $(RESTORE_ECID),)
+		--ecid "$$ECID"
 
 restore:
-	cd $(VM_DIR) && "$(PYTHON)" "$(PMD3_BRIDGE)" restore-update \
+	@$(call _resolve_ecid); \
+	cd "$(VM_DIR)" && "$(PYTHON)" "$(PMD3_BRIDGE)" restore-update \
 		--vm-dir . \
 		$(if $(RESTORE_UDID),--udid $(RESTORE_UDID),) \
-		$(if $(RESTORE_ECID),--ecid $(RESTORE_ECID),)
+		--ecid "$$ECID"
+
+restore_offline:
+	@$(call _resolve_ecid); \
+	SHSH=$$(ls "$(CURDIR)/$(VM_DIR)/"*.shsh 2>/dev/null | head -1); \
+	if [ -z "$$SHSH" ]; then \
+		echo "[-] No .shsh file in $(VM_DIR)/ — run 'make restore_get_shsh' first"; \
+		exit 1; \
+	fi; \
+	RESTORE_SRC=$$(echo "$(CURDIR)/$(VM_DIR)/iPhone"*_Restore); \
+	if [ ! -d "$$RESTORE_SRC" ]; then \
+		echo "[-] No iPhone*_Restore directory in $(VM_DIR)/"; \
+		exit 1; \
+	fi; \
+	echo "[+] Decrypting AEA images in place..."; \
+	for aea in "$$RESTORE_SRC"/*.dmg.aea; do \
+		[ -f "$$aea" ] || continue; \
+		[ "$$(xxd -l 4 -p "$$aea")" = "41454131" ] || continue; \
+		base=$$(basename "$$aea"); \
+		if ! ipsw fw aea -o "$$RESTORE_SRC" "$$aea"; then \
+			echo "[-] ipsw fw aea failed for $$base — aborting"; \
+			exit 1; \
+		fi; \
+		if ! mv -f "$$RESTORE_SRC/$${base%.aea}" "$$aea"; then \
+			echo "[-] mv failed for $$base — aborting (decrypted file missing?)"; \
+			exit 1; \
+		fi; \
+		if [ "$$(xxd -l 4 -p "$$aea")" = "41454131" ]; then \
+			echo "[-] $$base still AEA1-encrypted after decrypt — aborting"; \
+			exit 1; \
+		fi; \
+	done; \
+	echo "[+] Restoring offline with SHSH: $$(basename $$SHSH)"; \
+	cd "$(VM_DIR)" && "$(PYTHON)" "$(PMD3_BRIDGE)" restore-update \
+		--vm-dir . \
+		--tss "$$SHSH" \
+		$(if $(RESTORE_UDID),--udid $(RESTORE_UDID),) \
+		--ecid "$$ECID"
 
 # ═══════════════════════════════════════════════════════════════════
 # Ramdisk

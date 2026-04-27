@@ -21,6 +21,20 @@ extension Data {
     var hexString: String {
         self.map { String(format: "%02x", $0) }.joined()
     }
+    
+    init?(fromHexString hex: String) {
+        guard hex.count.isMultiple(of: 2) else {
+            return nil
+        }
+        
+        let chars = hex.map { $0 }
+        let bytes = stride(from: 0, to: chars.count, by: 2)
+            .map { String(chars[$0]) + String(chars[$0 + 1]) }
+            .compactMap { UInt8($0, radix: 16) }
+        
+        guard hex.count / bytes.count == 2 else { return nil }
+        self.init(bytes)
+    }
 }
 
 /// Patcher for the Filesystem payload.
@@ -28,6 +42,8 @@ public final class CryptexFilesystemPatcher: Patcher {
     public let component = "Filesystem"
     public let restoreDir: URL
     public let verbose: Bool
+    public let noBinpack: Bool
+    public let noVphoned: Bool
     let vphoneCliDirectory = URL(filePath: "./")
     
     var buildManiest: Data
@@ -36,10 +52,12 @@ public final class CryptexFilesystemPatcher: Patcher {
     
     // MARK: - Init
     
-    public init(buildManiest: Data, restoreDir: URL, verbose: Bool = true) {
+    public init(buildManiest: Data, restoreDir: URL, verbose: Bool = true, noBinpack: Bool = false, noVphoned: Bool = false) {
         self.buildManiest = buildManiest
         self.restoreDir = restoreDir
         self.verbose = verbose
+        self.noBinpack = noBinpack
+        self.noVphoned = noVphoned
     }
     
     deinit {
@@ -70,11 +88,11 @@ public final class CryptexFilesystemPatcher: Patcher {
         let trustcachePath = try createTrustcache(filesystem: unencryptedImage)
         
         print("Creating mtree")
-        try removeSpecificSystemFiles(filesystem: unencryptedImage)
+        let didEdit = try removeSpecificSystemFiles(filesystem: unencryptedImage)
         let mtreePath = try createMtree(filesystem: unencryptedImage)
         
         print("Creating DigestDB and Root Hash")
-        let (digestDbPath, rootHashPath) = try createDigestAndHash(filesystem: unencryptedImage, mtree: mtreePath)
+        let (digestDbPath, rootHashPath) = try createDigestAndHash(filesystem: unencryptedImage, mtree: mtreePath, remap: didEdit)
         let metadataPath = try compressCanonicalMetadata(mtree: mtreePath, digestDb: digestDbPath)
         let rootHashContainer = try wrapRootHash(rootHashPath)
         
@@ -126,16 +144,25 @@ public final class CryptexFilesystemPatcher: Patcher {
             print("- Patch Mobile Activation")
             try patchMobileActivation(targetMount: targetMount, cfwInput: cfwInputPath)
             
-            print("- Add vphoned")
-            try addVphoned(targetMount: targetMount, cfwInput: cfwInputPath)
-            try patchLaunchdCacheLoader(targetMount: targetMount, cfwInput: cfwInputPath)
+            if !noVphoned {
+                print("- Add vphoned")
+                try addVphoned(targetMount: targetMount, cfwInput: cfwInputPath)
+            }
+            if !noBinpack {
+                print("- Add binpack")
+                try addExtraServices(targetMount: targetMount, cfwInput: cfwInputPath)
+            }
+            if !noVphoned || !noBinpack {
+                try injectLaunchDaemons(targetMount: targetMount, cfwInput: cfwInputPath, vphoned: !noVphoned, cfw: !noBinpack)
+                try patchLaunchdCacheLoader(targetMount: targetMount, cfwInput: cfwInputPath)
+            }
         }
         
         print("- Finalizing merged image")
         try shrinkImage(dmg: targetImagePath)
         try convertToUDRWImage(input: targetImagePath, output: newDmgPath)
-        let key = try getAeaKey(self.restoreDir.appending(path: osPath))
         let metadata = try getAeaMetadata(self.restoreDir.appending(path: osPath))
+        let key = try getAeaKey(self.restoreDir.appending(path: osPath), metadata: metadata)
         let finalFile = try encryptAeaFile(newDmgPath, key: key, metadata: metadata)
         let finalDestination = self.restoreDir.appending(path: finalFile.lastPathComponent)
         if FileManager.default.fileExists(atPath: finalDestination.path) {
@@ -165,6 +192,52 @@ public final class CryptexFilesystemPatcher: Patcher {
         ])
     }
     
+    func injectLaunchDaemons(targetMount: String, cfwInput: URL, vphoned: Bool = true, cfw: Bool = true) throws {
+        let target = URL.init(filePath: targetMount)
+        let scriptDir = vphoneCliDirectory.appending(path: "scripts")
+
+        let tmpDir = try createTmpDir()
+        let launchdPath = tmpDir.appending(path: "launchd.plist")
+        let launchDaemonsPath = tmpDir.appending(path: "launchDaemons")
+        let launchdOgPath = target.appending(path: "/System/Library/xpc/launchd.plist")
+        try FileManager.default.createDirectory(at: launchDaemonsPath, withIntermediateDirectories: false)
+        try FileManager.default.moveItem(at: launchdOgPath, to: launchdPath)
+        
+        if vphoned {
+            let vphonedSrc = scriptDir.appendingPathComponent("vphoned")
+            let vphonedLaunchdPlist = vphonedSrc.appending(path: "vphoned.plist")
+            try FileManager.default.copyItem(at: vphonedLaunchdPlist,
+                                             to: target.appending(path: "System/Library/LaunchDaemons/vphoned.plist"))
+            try FileManager.default.copyItem(at: vphonedLaunchdPlist, to: launchDaemonsPath.appending(path: vphonedLaunchdPlist.lastPathComponent))
+        }
+        if cfw {
+            let launchDaemonsDir = cfwInput.appending(path: "cfw_input/jb/LaunchDaemons")
+            let launchDaemons = try FileManager.default.contentsOfDirectory(atPath: launchDaemonsDir.path)
+            for filename in launchDaemons {
+                let launchDaemonUrl = launchDaemonsDir.appending(component: filename)
+                let filename = launchDaemonUrl.lastPathComponent
+                let fsTarget = target.appending(path: "System/Library/LaunchDaemons/\(filename)")
+                try FileManager.default.copyItem(at: launchDaemonUrl, to: fsTarget)
+                try FileManager.default.copyItem(at: launchDaemonUrl, to: launchDaemonsPath.appending(path: filename))
+            }
+        }
+        
+        _ = try runProcess(vphoneCliDirectory.appending(path: ".venv/bin/python3").path, [
+            vphoneCliDirectory.appending(path: "scripts/patchers/cfw.py").path, "inject-daemons",
+            launchdPath.path, launchDaemonsPath.path
+        ])
+        try FileManager.default.moveItem(at: launchdPath, to: launchdOgPath)
+        _ = try runProcess("/bin/chmod", ["0644", launchdOgPath.path])
+    }
+    
+    func addExtraServices(targetMount: String, cfwInput: URL) throws {
+        _ = try runProcess("/usr/bin/tar", [
+            "--preserve-permissions",
+            "-xf", cfwInput.appending(path: "cfw_input/jb/iosbinpack64.tar").path,
+            "-C", targetMount
+        ])
+    }
+    
     func addVphoned(targetMount: String, cfwInput: URL) throws {
         let target = URL.init(filePath: targetMount)
         let scriptDir = vphoneCliDirectory.appending(path: "scripts")
@@ -184,24 +257,6 @@ public final class CryptexFilesystemPatcher: Patcher {
             targetBin.path
         ])
         _ = try runProcess("/bin/chmod", ["0755", targetBin.path])
-        
-        // Register Launch Daemon
-        let vphonedLaunchdPlist = vphonedSrc.appending(path: "vphoned.plist")
-        try FileManager.default.copyItem(at: vphonedLaunchdPlist,
-                                         to: target.appending(path: "System/Library/LaunchDaemons/vphoned.plist"))
-        let tmpDir = try createTmpDir()
-        let launchdPath = tmpDir.appending(path: "launchd.plist")
-        let launchDaemonsPath = tmpDir.appending(path: "launchDaemons")
-        let launchdOgPath = target.appending(path: "/System/Library/xpc/launchd.plist")
-        try FileManager.default.createDirectory(at: launchDaemonsPath, withIntermediateDirectories: false)
-        try FileManager.default.moveItem(at: launchdOgPath, to: launchdPath)
-        try FileManager.default.copyItem(at: vphonedLaunchdPlist, to: launchDaemonsPath.appending(path: vphonedLaunchdPlist.lastPathComponent))
-        _ = try runProcess(vphoneCliDirectory.appending(path: ".venv/bin/python3").path, [
-            vphoneCliDirectory.appending(path: "scripts/patchers/cfw.py").path, "inject-daemons",
-            launchdPath.path, launchDaemonsPath.path
-        ])
-        try FileManager.default.moveItem(at: launchdPath, to: launchdOgPath)
-        _ = try runProcess("/bin/chmod", ["0644", launchdOgPath.path])
     }
     
     func buildVphoned(vphonedSrc: URL, vphonedBin: URL) throws {
@@ -339,7 +394,7 @@ public final class CryptexFilesystemPatcher: Patcher {
         return im4pPath
     }
     
-    func createDigestAndHash(filesystem: URL, mtree: URL) throws -> (URL, URL) {
+    func createDigestAndHash(filesystem: URL, mtree: URL, remap: Bool) throws -> (URL, URL) {
         let (device, mount) = try attachImage(path: filesystem)
         defer { try? detachImage(deviceNode: device) }
 
@@ -357,12 +412,14 @@ public final class CryptexFilesystemPatcher: Patcher {
             <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
             <plist version="1.0">
             <dict>
-                <key>MODIFICATION</key>
-                <integer>\(modificationTime)</integer>
+            \(remap ? """
+                    <key>MODIFICATION</key>
+                    <integer>\(modificationTime)</integer>
+                """ : "")
             </dict>
             </plist>
             """
-        print("Used time: \(modificationTime)")
+        print("Used time: \(remap ? modificationTime : "none")")
         FileManager.default.createFile(atPath: mtreeRemapPath.path, contents: remapContent.data(using: .utf8))
 
         try unmount(mount: mount)
@@ -427,18 +484,23 @@ public final class CryptexFilesystemPatcher: Patcher {
         return mtreeFile
     }
     
-    func removeSpecificSystemFiles(filesystem: URL) throws {
+    func removeSpecificSystemFiles(filesystem: URL) throws -> Bool {
         let (device, mount) = try attachImage(path: filesystem, forceRW: true)
         defer { try? detachImage(deviceNode: device) }
         
         let removedPaths = [
-//            "/private/var/MobileAsset/PreinstalledAssets",
+            "/private/var/MobileAsset/PreinstalledAssets",
             "/private/var/MobileAsset/PreinstalledAssetsV2",
             "/private/var/staged_system_apps",
         ]
+        var didEdit = false
         for path in removedPaths {
-            try FileManager.default.removeItem(atPath: mount.appending(path))
+            if FileManager.default.fileExists(atPath: mount.appending(path)) {
+                try FileManager.default.removeItem(atPath: mount.appending(path))
+                didEdit = true
+            }
         }
+        return didEdit
     }
     
     func createTrustcache(filesystem: URL) throws -> URL {
@@ -671,7 +733,17 @@ public final class CryptexFilesystemPatcher: Patcher {
         }
     }
     
-    func getAeaKey(_ path: URL) throws -> String {
+    func getAeaKey(_ path: URL, metadata: [String: String]) throws -> String {
+        if let key = metadata["encryption_key"] {
+            let key = String(key.dropFirst(4))
+            if let unwrapped = Data(fromHexString: key),
+               let encoded = String(data: unwrapped, encoding: .utf8),
+               let data = Data(fromHexString: encoded) {
+                return "base64:\(data.base64EncodedString())"
+            }
+            return key
+        }
+        
         return try runProcess("/opt/homebrew/bin/ipsw", [
             "fw", "aea",
             "--no-color",
