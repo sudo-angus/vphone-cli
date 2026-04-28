@@ -15,6 +15,7 @@ extension VPhoneMenuController {
         menu.addItem(makeItem("Spotlight (Cmd+Space)", action: #selector(sendSpotlight)))
         menu.addItem(NSMenuItem.separator())
         menu.addItem(makeItem("Send Host Clipboard to Guest", action: #selector(sendHostClipboardToGuest)))
+        menu.addItem(makeItem("Receive Guest Clipboard to Host", action: #selector(receiveGuestClipboardToHost)))
         let typeItem = makeItem("Type ASCII from Clipboard", action: #selector(typeFromClipboard))
         if !keyHelper.hasHardwareKeyboard {
             typeItem.isEnabled = false
@@ -71,6 +72,36 @@ extension VPhoneMenuController {
                 showAlert(
                     title: "Clipboard",
                     message: "Sent \(text.count) characters to guest clipboard. Long-press in the target field to paste.",
+                    style: .informational
+                )
+            } catch {
+                showAlert(title: "Clipboard", message: "\(error)", style: .warning)
+            }
+        }
+    }
+
+    @objc func receiveGuestClipboardToHost() {
+        Task {
+            do {
+                let content = try await control.clipboardGet()
+                let pb = NSPasteboard.general
+                pb.clearContents()
+                var summary: [String] = []
+                if let text = content.text, !text.isEmpty {
+                    pb.setString(text, forType: .string)
+                    summary.append("\(text.count) characters of text")
+                }
+                if content.hasImage, let data = content.imageData, !data.isEmpty {
+                    pb.setData(data, forType: .png)
+                    summary.append("\(data.count) bytes of image (PNG)")
+                }
+                guard !summary.isEmpty else {
+                    showAlert(title: "Clipboard", message: "Guest clipboard is empty.", style: .warning)
+                    return
+                }
+                showAlert(
+                    title: "Clipboard",
+                    message: "Copied from guest: \(summary.joined(separator: ", ")).",
                     style: .informational
                 )
             } catch {
