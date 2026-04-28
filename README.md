@@ -225,30 +225,30 @@ make boot
 ## Optional Host TCP Workaround
 
 If the host is behind a corporate VPN / traffic-forwarding agent and the guest
-loses outbound TCP connectivity under `VZNATNetworkDeviceAttachment()`, run the
-transparent proxy helper in a separate terminal:
+loses outbound TCP connectivity under `VZNATNetworkDeviceAttachment()`, pass
+`--tcp-workaround` when booting:
 
 ```bash
-sudo ./scripts/vm_tproxy_start.sh
+make boot EXTRA_ARGS=--tcp-workaround
 ```
 
-This keeps running in the foreground until you stop it with `Ctrl+C`. The
-wrapper automatically removes its `pf` redirect rule on exit. You can also
-check or stop it explicitly:
-
-```bash
-sudo ./scripts/vm_tproxy_start.sh status
-sudo ./scripts/vm_tproxy_start.sh stop
-```
+`vphone-cli` itself stays unprivileged. On startup it auto-detects the
+Virtualization shared bridge and asks for a one-time admin password via
+the standard system prompt; only the privileged helper (`pfctl` rule install /
+flush, `/dev/pf` + `DIOCNATLOOK` queries, and the userspace TCP relay) runs as
+root. The helper is told the parent's pid via `WATCH_PID`, so if vphone-cli
+exits or crashes the helper tears the `pf` anchor down on its own — no
+launchd, no leftover rules.
 
 Notes:
 
 - This workaround only proxies IPv4 TCP. It does not repair UDP / QUIC traffic.
-- The helper auto-detects the Virtualization shared bridge and its IPv4 address.
-  Only override `LISTEN_ADDR` / `PF_INTERFACE` if auto-detection fails on a
-  particular host.
-- If `make boot` is restarted, you can usually leave the helper running; only
-  restart it if the proxy process exited or the host `pf` rules were reset.
+- The helper inherits the same auto-detection used by the older standalone
+  scripts; on a non-standard host you can still override `LISTEN_ADDR` /
+  `PF_INTERFACE` via env vars.
+- If you prefer to drive the helper outside of `vphone-cli` (e.g. for
+  debugging), `scripts/vm_tproxy_start.sh start|stop|status` still works as
+  before.
 
 In a separate terminal, start usbmux forward tunnels:
 

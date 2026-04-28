@@ -213,25 +213,27 @@ make boot
 ## 可选的宿主机 TCP 绕行方案
 
 如果宿主机处在公司 VPN / 流量转发软件后面，导致
-`VZNATNetworkDeviceAttachment()` 下的 guest 出站 TCP 不稳定，可以在另一个终端里运行：
+`VZNATNetworkDeviceAttachment()` 下的 guest 出站 TCP 不稳定，启动时加
+`--tcp-workaround` 即可：
 
 ```bash
-sudo ./scripts/vm_tproxy_start.sh
+make boot EXTRA_ARGS=--tcp-workaround
 ```
 
-该脚本以前台方式持续运行，按 `Ctrl+C` 即可停止。退出时会自动清理自己写入的 `pf`
-重定向规则。也可以显式查看状态或停止：
-
-```bash
-sudo ./scripts/vm_tproxy_start.sh status
-sudo ./scripts/vm_tproxy_start.sh stop
-```
+`vphone-cli` 本身仍以普通用户运行。启动时它会自动探测 Virtualization
+shared bridge，并通过系统的标准管理员授权框申请一次提权；真正需要 root
+的部分（`pfctl` 规则装载/清理、`/dev/pf` + `DIOCNATLOOK` 查询、用户态
+TCP 转发）才在 helper 里以 root 跑。helper 通过 `WATCH_PID` 监听父进程，
+一旦 vphone-cli 退出或崩溃，它会自行拆掉 `pf` anchor —— 不依赖 launchd，
+也不会留下残余规则。
 
 注意：
 
 - 这个绕行方案只代理 IPv4 TCP，不处理 UDP / QUIC。
-- 脚本会自动探测 Virtualization shared bridge 及其 IPv4 地址。只有在个别宿主机自动探测失败时，才需要手动传 `LISTEN_ADDR` / `PF_INTERFACE`。
-- 如果只是 `make boot` 重启，通常不需要重启这个 helper；只有代理进程自己退出，或者宿主机 `pf` 规则被重置时，才需要重启。
+- helper 沿用旧版独立脚本的自动探测逻辑；少数特殊网络环境下，仍可以通过
+  `LISTEN_ADDR` / `PF_INTERFACE` 环境变量手动覆盖。
+- 如果你想绕开 `vphone-cli` 单独调试 helper，仍然可以直接跑
+  `scripts/vm_tproxy_start.sh start|stop|status`，行为没变。
 
 在另一个终端中启动 usbmux 转发隧道：
 

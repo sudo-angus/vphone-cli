@@ -59,6 +59,18 @@ struct VPhoneBootCLI: ParsableCommand {
     @Flag(name: .customLong("no-vphoned"), help: "Exclude vphoned usage (patchless-only).")
     var noVphoned: Bool = false
 
+    @Flag(
+        name: .customLong("tcp-workaround"),
+        help: """
+        Start the host-side transparent TCP proxy workaround for hosts where a \
+        VPN / traffic-forwarding agent breaks guest outbound TCP under \
+        VZNATNetworkDeviceAttachment. Triggers a one-time admin password \
+        prompt; the proxy runs only for the lifetime of this boot. \
+        Unavailable with --dfu.
+        """
+    )
+    var tcpWorkaround: Bool = false
+
     /// DFU mode runs headless (no GUI).
     var noGraphics: Bool {
         dfu
@@ -69,6 +81,12 @@ struct VPhoneBootCLI: ParsableCommand {
     }
 
     mutating func validate() throws {
+        if dfu, tcpWorkaround {
+            throw ValidationError(
+                "`--tcp-workaround` is unavailable with `--dfu` because DFU mode has no guest network."
+            )
+        }
+
         if dfu, let packageURL = installPackageURL {
             throw ValidationError(
                 "`--install-ipa` is unavailable with `--dfu` because DFU mode does not start the guest control channel: \(packageURL.path)"

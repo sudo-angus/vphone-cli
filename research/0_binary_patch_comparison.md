@@ -271,6 +271,34 @@
   - wrapped start/stop in explicit cleanup logic so the `pf` anchor is removed if the foreground proxy exits
 - Remaining limitation: this only covers IPv4 TCP. UDP / QUIC failures still need a separate fix path if they matter for a given workload.
 
+## Host Network Workaround — vphone-cli Integration (2026-04-28)
+
+- `vphone-cli boot` gained a `--tcp-workaround` opt-in flag. With the flag set,
+  the boot path drives the existing host helper end-to-end so the user no
+  longer needs to start `scripts/vm_tproxy_start.sh` in a second terminal.
+- Privilege split is preserved: the Swift host process keeps running as the
+  unprivileged user. The privileged helper (loaded via
+  `osascript do shell script ... with administrator privileges`) is the only
+  thing that runs as root, and only handles `pfctl` rule install/flush,
+  `/dev/pf` + `DIOCNATLOOK` queries, and the userspace TCP relay.
+- New file `sources/vphone-cli/VPhoneTransparentProxy.swift` re-implements the
+  shared-bridge auto-detect (first `bridge*` with IPv4 + a `vmenet*` member)
+  in Swift, then exports that to the helper via env vars (`PF_INTERFACE`,
+  `LISTEN_ADDR`).
+- New `WATCH_PID` env var on `scripts/vm_tproxy_start.sh` puts the helper into
+  daemon-watchdog mode: it polls `kill -0 $WATCH_PID` and, when vphone-cli
+  exits, immediately SIGTERMs the relay and flushes the `pf` anchor. This is
+  the failsafe when osascript does not propagate SIGTERM through to the sudo
+  child.
+- All previous stability fixes (no idle-disconnect, blocking relay, keepalive,
+  bridge auto-detect) are retained; the manual `start|stop|status` interface
+  on the script still works for debugging.
+- Boot lifecycle hooks: `VPhoneAppDelegate.startVirtualMachine` starts the
+  helper before `vm.start(...)`, and `applicationWillTerminate` calls
+  `transparentProxy?.stop()` so SIGINT / window-close cleanly tears it down.
+- No launchd, no sudoers entry, no persistent state — privileges are dropped
+  the moment the boot exits.
+
 ## Automation Notes (2026-03-06)
 
 - `scripts/setup_machine.sh` non-interactive flow fix: renamed local variable `status` to `boot_state` in first-boot log wait and boot-analysis wait helpers to avoid zsh `status` read-only special parameter collision.

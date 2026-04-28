@@ -13,6 +13,7 @@ class VPhoneAppDelegate: NSObject, NSApplicationDelegate {
     private var appWindowController: VPhoneAppWindowController?
     private var locationProvider: VPhoneLocationProvider?
     private var hostControl: VPhoneHostControl?
+    private var transparentProxy: VPhoneTransparentProxy?
     private var sigintSource: DispatchSourceSignal?
     private var didAttemptAutoInstall = false
 
@@ -74,6 +75,10 @@ class VPhoneAppDelegate: NSObject, NSApplicationDelegate {
 
         let vm = try VPhoneVirtualMachine(options: options)
         self.vm = vm
+
+        if cli.tcpWorkaround {
+            startTransparentProxy()
+        }
 
         try await vm.start(forceDFU: cli.dfu)
 
@@ -241,8 +246,22 @@ class VPhoneAppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    @MainActor
+    private func startTransparentProxy() {
+        guard let scriptURL = VPhoneTransparentProxy.locateHelperScript() else {
+            print(
+                "[tproxy] could not locate scripts/vm_tproxy_start.sh — set VPHONE_TPROXY_SCRIPT or run from the repo; skipping"
+            )
+            return
+        }
+        let proxy = VPhoneTransparentProxy(scriptURL: scriptURL)
+        proxy.start()
+        transparentProxy = proxy
+    }
+
     func applicationWillTerminate(_: Notification) {
         hostControl?.stop()
+        transparentProxy?.stop()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_: NSApplication) -> Bool {

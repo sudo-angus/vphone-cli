@@ -5,8 +5,11 @@ set -euo pipefail
 # Adds pf redirect rules so all VM TCP traffic goes through vm_tproxy.py.
 #
 # Usage:
-#   sudo ./scripts/vm_tproxy_start.sh          # start
-#   sudo ./scripts/vm_tproxy_start.sh stop      # stop
+#   sudo ./scripts/vm_tproxy_start.sh                    # start (manual)
+#   sudo ./scripts/vm_tproxy_start.sh stop                # stop
+#   sudo WATCH_PID=$$ ./scripts/vm_tproxy_start.sh start  # daemon mode:
+#       cleans up automatically when WATCH_PID is no longer alive
+#       (used by vphone-cli's --tcp-workaround integration)
 
 SCRIPT_DIR="${0:a:h}"
 ANCHOR="${ANCHOR:-vphone_tproxy}"
@@ -16,7 +19,10 @@ PF_INTERFACE="${PF_INTERFACE:-}"
 PID_FILE="${PID_FILE:-/tmp/${ANCHOR}.pid}"
 CONNECT_TIMEOUT="${CONNECT_TIMEOUT:-30}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
+WATCH_PID="${WATCH_PID:-}"
+WATCH_INTERVAL="${WATCH_INTERVAL:-2}"
 proxy_pid=""
+watchdog_pid=""
 
 require_root() {
     if [[ "$(id -u)" -ne 0 ]]; then
@@ -158,9 +164,18 @@ kill_proxy() {
     fi
 }
 
+kill_watchdog() {
+    if [[ -n "$watchdog_pid" ]] && kill -0 "$watchdog_pid" 2>/dev/null; then
+        kill "$watchdog_pid" 2>/dev/null || true
+        wait "$watchdog_pid" 2>/dev/null || true
+    fi
+    watchdog_pid=""
+}
+
 cleanup() {
     local exit_code="${1:-$?}"
     trap - EXIT INT TERM
+    kill_watchdog
     kill_proxy
     flush_anchor
     echo "[tproxy] stopped."
@@ -211,7 +226,24 @@ start() {
         --connect-timeout "$CONNECT_TIMEOUT" &
     proxy_pid="$!"
     echo "$proxy_pid" >"$PID_FILE"
-    wait "$proxy_pid"
+
+    if [[ -n "$WATCH_PID" ]]; then
+        if ! kill -0 "$WATCH_PID" 2>/dev/null; then
+            echo "[tproxy] WATCH_PID=$WATCH_PID is not alive at startup; aborting" >&2
+            exit 1
+        fi
+        echo "[tproxy] watchdog: tracking parent pid=$WATCH_PID (interval=${WATCH_INTERVAL}s)"
+        (
+            while kill -0 "$WATCH_PID" 2>/dev/null; do
+                sleep "$WATCH_INTERVAL"
+            done
+            echo "[tproxy] parent pid=$WATCH_PID exited; tearing down" >&2
+            kill -TERM "$proxy_pid" 2>/dev/null || true
+        ) &
+        watchdog_pid="$!"
+    fi
+
+    wait "$proxy_pid" 2>/dev/null || true
 }
 
 stop() {
