@@ -210,6 +210,29 @@ shutdown -h now
 make boot
 ```
 
+## 可选的宿主机 TCP 绕行方案
+
+如果宿主机处在公司 VPN / 流量转发软件后面，导致
+`VZNATNetworkDeviceAttachment()` 下的 guest 出站 TCP 不稳定，可以在另一个终端里运行：
+
+```bash
+sudo ./scripts/vm_tproxy_start.sh
+```
+
+该脚本以前台方式持续运行，按 `Ctrl+C` 即可停止。退出时会自动清理自己写入的 `pf`
+重定向规则。也可以显式查看状态或停止：
+
+```bash
+sudo ./scripts/vm_tproxy_start.sh status
+sudo ./scripts/vm_tproxy_start.sh stop
+```
+
+注意：
+
+- 这个绕行方案只代理 IPv4 TCP，不处理 UDP / QUIC。
+- 脚本会自动探测 Virtualization shared bridge 及其 IPv4 地址。只有在个别宿主机自动探测失败时，才需要手动传 `LISTEN_ADDR` / `PF_INTERFACE`。
+- 如果只是 `make boot` 重启，通常不需要重启这个 helper；只有代理进程自己退出，或者宿主机 `pf` 规则被重置时，才需要重启。
+
 在另一个终端中启动 usbmux 转发隧道：
 
 ```bash

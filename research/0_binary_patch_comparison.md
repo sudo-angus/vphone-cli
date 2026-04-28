@@ -259,6 +259,18 @@
     - signed release `vphone-cli --help`: exit `137`
     - freshly signed debug control binary `--help`: exit `137`
 
+## Host Network Workaround Notes (2026-04-28)
+
+- Added a hardened host-side transparent TCP proxy helper: `scripts/vm_tproxy.py` + `scripts/vm_tproxy_start.sh`.
+- The helper remains an external workaround for host environments where a corporate VPN / traffic-forwarding agent breaks guest outbound TCP under `VZNATNetworkDeviceAttachment()`.
+- Stability fixes applied in this revision:
+  - removed the old 120-second idle disconnect so long-lived guest TCP sessions are not forcibly torn down by the proxy itself
+  - enabled socket keepalive and restored blocking-mode relay after outbound connect, avoiding silent disconnects caused by inherited connect timeouts
+  - made the `pf` redirect rule derive its source network from the selected interface instead of hardcoding `bridge100` + `192.168.64.0/24`
+  - added zero-config endpoint discovery: if neither `LISTEN_ADDR` nor `PF_INTERFACE` is set, the wrapper now picks the first `bridge*` interface that owns an IPv4 address and has a `vmenet*` member
+  - wrapped start/stop in explicit cleanup logic so the `pf` anchor is removed if the foreground proxy exits
+- Remaining limitation: this only covers IPv4 TCP. UDP / QUIC failures still need a separate fix path if they matter for a given workload.
+
 ## Automation Notes (2026-03-06)
 
 - `scripts/setup_machine.sh` non-interactive flow fix: renamed local variable `status` to `boot_state` in first-boot log wait and boot-analysis wait helpers to avoid zsh `status` read-only special parameter collision.
