@@ -3,14 +3,15 @@ import Foundation
 /// Drives the host-side transparent TCP proxy workaround end-to-end so the user
 /// does not have to start `scripts/vm_tproxy_start.sh` manually.
 ///
-/// The Swift side runs as the unprivileged user; it auto-detects the
-/// Virtualization shared bridge endpoint and asks for a one-shot admin
-/// authorization via `osascript do shell script ... with administrator
-/// privileges`. The actually-privileged work — `pfctl` anchor load/flush,
-/// `/dev/pf` + `DIOCNATLOOK` queries, and the userspace TCP relay — stays in
-/// `scripts/vm_tproxy.py` + `scripts/vm_tproxy_start.sh`, which are launched by
-/// the helper. The helper is told our pid via `WATCH_PID` so it tears the
-/// `pf` anchor down and exits if vphone-cli dies without sending SIGTERM.
+/// The Swift side runs as the unprivileged user and elevates via `sudo` on the
+/// inherited controlling TTY. If the user already primed sudo's credential
+/// cache (e.g. via `boot.sh` running `make amfidont_allow_vphone` first), this
+/// is silent; otherwise sudo prompts on /dev/tty. The actually-privileged
+/// work — `pfctl` anchor load/flush, `/dev/pf` + `DIOCNATLOOK` queries, and
+/// the userspace TCP relay — stays in `scripts/vm_tproxy.py` +
+/// `scripts/vm_tproxy_start.sh`. The helper is told our pid via `WATCH_PID`
+/// so it tears the `pf` anchor down and exits if vphone-cli dies without
+/// sending SIGTERM.
 @MainActor
 final class VPhoneTransparentProxy {
     struct BridgeEndpoint: Sendable {
@@ -78,11 +79,13 @@ final class VPhoneTransparentProxy {
             endpoint: endpoint,
             parentPid: parentPid
         )
-        let appleScript = "do shell script \"\(Self.escapeForAppleScript(inner))\" with administrator privileges"
 
         let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        p.arguments = ["-e", appleScript]
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
+        // sudo prompts on /dev/tty regardless of stdin, so no need to forward
+        // FileHandle.standardInput here. We do route the helper's stdout/stderr
+        // through pipes so we can prefix or relay them later if needed.
+        p.arguments = ["/bin/zsh", "-c", inner]
 
         let outPipe = Pipe()
         let errPipe = Pipe()
@@ -100,8 +103,6 @@ final class VPhoneTransparentProxy {
         }
         p.terminationHandler = { proc in
             let status = proc.terminationStatus
-            // osascript exits 1 with `errMsg` on stderr if the user cancels the
-            // password dialog; we already piped that. Just note the exit.
             if status != 0 {
                 FileHandle.standardError.write(
                     Data("[tproxy] helper exited with status \(status)\n".utf8)
@@ -114,7 +115,7 @@ final class VPhoneTransparentProxy {
             process = p
             stdoutPipe = outPipe
             stderrPipe = errPipe
-            print("[tproxy] launching privileged helper (one-time admin prompt may appear)")
+            print("[tproxy] launching privileged helper via sudo (may prompt on /dev/tty if cache is cold)")
         } catch {
             print("[tproxy] failed to launch helper: \(error.localizedDescription)")
         }
@@ -225,12 +226,5 @@ final class VPhoneTransparentProxy {
         // Wrap in single quotes; close, escape embedded ', re-open.
         let escaped = s.replacingOccurrences(of: "'", with: "'\\''")
         return "'\(escaped)'"
-    }
-
-    private static func escapeForAppleScript(_ s: String) -> String {
-        // AppleScript string literal: escape `\` and `"`.
-        var out = s.replacingOccurrences(of: "\\", with: "\\\\")
-        out = out.replacingOccurrences(of: "\"", with: "\\\"")
-        return out
     }
 }

@@ -7,6 +7,14 @@
 # 3) DFU restore (boot_dfu + restore_get_shsh + restore)
 # 4) Ramdisk + CFW (boot_dfu + ramdisk_build + ramdisk_send + iproxy + cfw_install / cfw_install_dev / cfw_install_jb)
 # 5) First boot launch (`make boot`) with printed in-guest commands
+#
+# --phase splits the run into two halves at the natural DFU stop/start
+# boundary between (3) and (4). The default --phase=all keeps the original
+# single-shot behavior; --phase=prep stops after (3); --phase=install
+# resumes from (4) and assumes prep already produced fw artifacts in vm/.
+# This lets you reboot the host between the two halves when long ldid /
+# DMG / AMFI activity wedges system daemons (mds, syspolicyd, amfid, etc.)
+# without re-doing the multi-GB firmware download/patch/restore.
 
 set -euo pipefail
 
@@ -64,6 +72,7 @@ JB_MODE=0
 DEV_MODE=0
 LESS_MODE=0
 SKIP_PROJECT_SETUP=0
+PHASE="all"
 
 die() {
   echo "[-] $*" >&2
@@ -968,15 +977,27 @@ parse_args() {
       --skip-project-setup)
         SKIP_PROJECT_SETUP=1
         ;;
+      --phase=*)
+        PHASE="${arg#--phase=}"
+        ;;
       -h|--help)
         cat <<'EOF'
-Usage: setup_machine.sh [--jb] [--dev] [--skip-project-setup]
+Usage: setup_machine.sh [--jb] [--dev] [--less] [--skip-project-setup] [--phase=all|prep|install]
 
 Options:
   --jb                    Use jailbreak firmware patching + jailbreak CFW install.
   --dev                   Use dev firmware patching + dev CFW install.
   --less                  Use patchless firmware patching + CFW install.
   --skip-project-setup    Skip setup_tools/build stage.
+  --phase=all             Default. Run the full pipeline in one shot.
+  --phase=prep            Run setup/firmware/restore only; stop before ramdisk+CFW.
+                          Use this when you want to reboot the host (to clear
+                          mds/syspolicyd/amfid wedges) before the heavy ldid
+                          step in --phase=install.
+  --phase=install         Resume from ramdisk_build through first boot/analysis.
+                          Requires --phase=prep (or a previous --phase=all that
+                          got at least past restore) to have run already; the
+                          firmware artifacts in vm/ are reused as-is.
 
 Environment:
   NONE_INTERACTIVE=1      Auto-continue first-boot prompts + run final boot analysis.
@@ -991,6 +1012,39 @@ EOF
         ;;
     esac
   done
+
+  case "$PHASE" in
+    all|prep|install) ;;
+    *) die "Invalid --phase value: ${PHASE} (expected: all, prep, install)" ;;
+  esac
+}
+
+# preflight_install_phase ensures the firmware artifacts produced by --phase=prep
+# (or by an earlier --phase=all run) are present before we re-enter the device
+# interaction stage. We don't try to validate everything — downstream make
+# targets fail loud enough — but we want a friendly error if the user runs
+# --phase=install without ever having run prep, or in the wrong directory.
+preflight_install_phase() {
+  local restore_dir_glob="${VM_DIR_ABS}/iPhone"
+  local found_restore_dir=0
+  local entry
+
+  [[ -d "$VM_DIR_ABS" ]] || die "VM directory not found: ${VM_DIR_ABS}\n  Run --phase=prep (or full make setup_machine) first."
+
+  if [[ ! -x "${PROJECT_ROOT}/.build/release/vphone-cli" ]]; then
+    die "Signed binary not found at .build/release/vphone-cli\n  Run --phase=prep (or 'make build') first."
+  fi
+
+  for entry in "${VM_DIR_ABS}"/iPhone*_Restore; do
+    if [[ -f "${entry}/BuildManifest.plist" ]]; then
+      found_restore_dir=1
+      break
+    fi
+  done
+  (( found_restore_dir == 1 )) \
+    || die "No iPhone*_Restore/BuildManifest.plist under ${VM_DIR_ABS}\n  --phase=install needs the firmware artifacts produced by --phase=prep (fw_prepare + fw_patch).\n  Run --phase=prep first."
+
+  echo "[+] --phase=install preflight OK (vm dir + signed binary + restore artifacts present)"
 }
 
 main() {
@@ -1014,6 +1068,10 @@ main() {
     die "--jb, --dev, and --less are mutually exclusive"
   fi
 
+  if [[ "$LESS_MODE" -eq 1 && "$PHASE" != "all" ]]; then
+    die "--less is incompatible with --phase=${PHASE} (less mode skips the ramdisk+CFW stage that the split is designed around)"
+  fi
+
   if [[ "$JB_MODE" -eq 1 ]]; then
     fw_patch_target="fw_patch_jb"
     cfw_install_target="cfw_install_jb"
@@ -1028,51 +1086,79 @@ main() {
     mode_label="less"
   fi
 
-  echo "[*] setup_machine mode: ${mode_label}, project_setup=$([[ "$SKIP_PROJECT_SETUP" -eq 1 ]] && echo "skip" || echo "run"), non_interactive=${NONE_INTERACTIVE}, no_binpack=${NO_BINPACK}, no_vphoned=${NO_VPHONED}"
+  echo "[*] setup_machine mode: ${mode_label}, phase=${PHASE}, project_setup=$([[ "$SKIP_PROJECT_SETUP" -eq 1 ]] && echo "skip" || echo "run"), non_interactive=${NONE_INTERACTIVE}, no_binpack=${NO_BINPACK}, no_vphoned=${NO_VPHONED}"
 
-  if [[ "$SKIP_PROJECT_SETUP" -eq 1 ]]; then
-    echo ""
-    echo "=== Project setup ==="
-    echo "[*] Skipping setup_tools/build"
-  else
-    check_platform
-    install_brew_deps
-    ensure_python_linked
-
-    if [[ "$LESS_MODE" -eq 1 ]]; then
-      VARIANT=less run_make "Project setup" setup_tools
+  # ── Phase 1 (prep): project setup + firmware + restore ─────────
+  if [[ "$PHASE" != "install" ]]; then
+    if [[ "$SKIP_PROJECT_SETUP" -eq 1 ]]; then
+      echo ""
+      echo "=== Project setup ==="
+      echo "[*] Skipping setup_tools/build"
     else
-      run_make "Project setup" setup_tools
+      check_platform
+      install_brew_deps
+      ensure_python_linked
+
+      if [[ "$LESS_MODE" -eq 1 ]]; then
+        VARIANT=less run_make "Project setup" setup_tools
+      else
+        run_make "Project setup" setup_tools
+      fi
+      run_make "Project setup" build
     fi
-    run_make "Project setup" build
+
+    # Activate venv so all child scripts (cfw_install, patchers, etc.) use the
+    # project Python with capstone/keystone/pyimg4 installed, not the bare system python3.
+    export PATH="$PROJECT_ROOT/.venv/bin:$PATH"
+
+    run_make "Firmware prep" vm_new
+    run_make "Firmware prep" fw_prepare
+    if [[ "$LESS_MODE" -eq 0 ]]; then
+      run_make "Firmware patch" "$fw_patch_target"
+    else
+      run_make_sudo "Firmware patch" "$fw_patch_target"
+    fi
+
+    echo ""
+    echo "=== Restore phase ==="
+    start_boot_dfu
+    load_device_identity
+    wait_for_recovery
+    run_make "Restore" restore_get_shsh RESTORE_UDID="$DEVICE_UDID" RESTORE_ECID="0x$DEVICE_ECID"
+    run_make "Restore" restore RESTORE_UDID="$DEVICE_UDID" RESTORE_ECID="0x$DEVICE_ECID"
+    wait_for_post_restore_reboot
+    stop_boot_dfu
   fi
 
-  # Activate venv so all child scripts (cfw_install, patchers, etc.) use the
-  # project Python with capstone/keystone/pyimg4 installed, not the bare system python3.
-  export PATH="$PROJECT_ROOT/.venv/bin:$PATH"
-
-  run_make "Firmware prep" vm_new
-  run_make "Firmware prep" fw_prepare
-  if [[ "$LESS_MODE" -eq 0 ]]; then
-    run_make "Firmware patch" "$fw_patch_target"
-  else
-    run_make_sudo "Firmware patch" "$fw_patch_target"
+  if [[ "$PHASE" == "prep" ]]; then
+    echo ""
+    echo "=== Prep phase done ==="
+    echo "[+] Firmware artifacts and restored device are ready."
+    echo "    Reboot the host now if you've seen long-uptime hangs (mds/syspolicyd/amfid),"
+    echo "    then resume with:"
+    if [[ "$JB_MODE" -eq 1 ]]; then
+      echo "      make setup_machine_install JB=1"
+    elif [[ "$DEV_MODE" -eq 1 ]]; then
+      echo "      make setup_machine_install DEV=1"
+    else
+      echo "      make setup_machine_install"
+    fi
+    return 0
   fi
 
-  echo ""
-  echo "=== Restore phase ==="
-  start_boot_dfu
-  load_device_identity
-  wait_for_recovery
-  run_make "Restore" restore_get_shsh RESTORE_UDID="$DEVICE_UDID" RESTORE_ECID="0x$DEVICE_ECID"
-  run_make "Restore" restore RESTORE_UDID="$DEVICE_UDID" RESTORE_ECID="0x$DEVICE_ECID"
-  wait_for_post_restore_reboot
-  stop_boot_dfu
+  # ── Phase 2 (install): ramdisk + CFW + first boot + analysis ──
+  if [[ "$PHASE" == "install" ]]; then
+    echo ""
+    echo "=== Install phase preflight ==="
+    preflight_install_phase
+    # venv activation is normally done in the prep block; re-apply for install runs.
+    export PATH="$PROJECT_ROOT/.venv/bin:$PATH"
+  fi
 
   if [[ "$LESS_MODE" -eq 0 ]]; then
     echo "[*] Waiting ${POST_KILL_SETTLE_DELAY}s for cleanup before ramdisk stage..."
     sleep "$POST_KILL_SETTLE_DELAY"
-  
+
     echo ""
     echo "=== Ramdisk + CFW phase ==="
     start_boot_dfu

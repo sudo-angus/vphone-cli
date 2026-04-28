@@ -112,10 +112,41 @@ git clone --recurse-submodules https://github.com/Lakr233/vphone-cli.git
 ```bash
 make setup_machine            # full automation through "First Boot" (includes restore/ramdisk/CFW)
 # options: NONE_INTERACTIVE=1 SUDO_PASSWORD=...
-# LESS=1 for patchless variant (- AMFI, SSV, Img4, TXM bypasses) 
+# LESS=1 for patchless variant (- AMFI, SSV, Img4, TXM bypasses)
 # DEV=1 for dev variant (+ TXM entitlement/debug bypasses)
 # JB=1 for jailbreak variant (+ full security bypass)
 ```
+
+### Splitting `setup_machine` across a host reboot
+
+Long `setup_machine` runs occasionally hang on macOS during the heavy
+`ldid` / DMG-mount activity that starts at "Re-signing Mach-O binaries"
+(inside `ramdisk_build` and `cfw_install*`). The usual culprits are
+wedged system daemons that accumulate state over long uptime —
+`mds_stores`, `syspolicyd`, `fseventsd`, occasionally `amfid` after
+sleep/wake on a SIP/AMFI-disabled host. Rebooting clears them, but you
+don't want to re-do the multi-GB firmware download or DFU restore.
+
+Two extra targets let you split the run at the natural DFU stop/start
+boundary between restore and ramdisk:
+
+```bash
+make setup_machine_prep       # project setup + fw_prepare + fw_patch + DFU restore
+# (reboot the host here if you suspect host-side wedging)
+make setup_machine_install    # ramdisk_build + ramdisk_send + cfw_install + first boot + analysis
+```
+
+Both halves accept the same `JB=1` / `DEV=1` / `SKIP_PROJECT_SETUP=1` /
+`NONE_INTERACTIVE=1` / `SUDO_PASSWORD=…` options as `setup_machine`
+itself. The install half runs a preflight that errors out if `vm/`
+doesn't already contain the firmware artifacts produced by the prep
+half — so accidentally running the second half first gives a clear
+error rather than corrupt output.
+
+`make setup_machine` is unchanged and continues to run end-to-end in
+one shot; the split is opt-in. `LESS=1` is incompatible with the split
+because the patchless variant skips the ramdisk+CFW stage that the
+split is built around — use plain `make setup_machine LESS=1`.
 
 ## Manual Setup
 
@@ -328,6 +359,42 @@ Reboot the VM. The SSH server will start automatically on the next boot.
 **Q: Can I install `.tipa` files?**
 
 Yes. The install menu supports both `.ipa` and `.tipa` packages. Drag and drop or use the file picker.
+
+**Q: `make setup_machine` hangs at "Re-signing Mach-O binaries" (or in `cfw_install*`) with `ldid` stuck.**
+
+`ldid` itself is fast — when it hangs, it's almost always a wedged
+host-side system daemon holding the file or volume:
+
+- `mds_stores` / `mdworker` — Spotlight indexing the freshly-attached
+  ramdisk DMG, contending with `ldid`'s writes.
+- `fseventsd` — fsevents on the same volume.
+- `syspolicyd` — Gatekeeper re-evaluating files marked with
+  `com.apple.quarantine`.
+- `amfid` — occasionally half-broken on a SIP/AMFI-disabled host after
+  sleep/wake, blocking `mmap(PROT_EXEC)` of the binary being signed.
+
+To diagnose the live hang (don't Ctrl-C — the call stack tells you
+which daemon is at fault):
+
+```bash
+sudo sample $(pgrep -f ldid) 3 -file /tmp/ldid.sample
+sudo lsof -p $(pgrep -f ldid)
+sudo spindump 10 -reveal -file /tmp/spindump.txt
+```
+
+To unblock without rebooting (try in order, retest after each):
+
+```bash
+sudo mdutil -i off /Volumes/SSHRD          # or actual mountpoint
+sudo killall mds_stores mdworker mdworker_shared 2>/dev/null
+sudo killall syspolicyd 2>/dev/null         # respawns automatically
+sudo killall fseventsd 2>/dev/null          # respawns automatically
+```
+
+If the hang is reproducible and you want to rerun without redoing
+firmware download/restore, use the split flow described in
+[Splitting `setup_machine` across a host reboot](#splitting-setup_machine-across-a-host-reboot)
+— `setup_machine_prep` then reboot then `setup_machine_install`.
 
 **Q: Can I update to a newer iOS version?**
 

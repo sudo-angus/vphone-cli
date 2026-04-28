@@ -46,12 +46,19 @@ help:
 	@echo "  make setup_machine                   Full setup through First Boot"
 	@echo "    Options: JB=1                      Jailbreak firmware/CFW path"
 	@echo "             DEV=1                     Dev firmware/CFW path (dev TXM + cfw_install_dev)"
-	@echo "             LESS=1                    Build, keeping iOS security mitigations enabled. 
+	@echo "             LESS=1                    Build, keeping iOS security mitigations enabled."
 	@echo "             SKIP_PROJECT_SETUP=1      Skip setup_tools/build"
 	@echo "             NONE_INTERACTIVE=1        Auto-continue prompts + boot analysis"
 	@echo "             SUDO_PASSWORD=...         Preload sudo credential for setup flow"
 	@echo "             NO_BINPACK=1              Excludes the SSH, VNC, ... binaries from being installed (patchless-only, currently)"
 	@echo "             NO_VPHONED=1              Excludes vphoned from being installed (patchless-only, currently)"
+	@echo "  make setup_machine_prep              Prep half of setup_machine (deps + fw_patch + restore)."
+	@echo "                                       Stops before ramdisk_build so you can reboot the host"
+	@echo "                                       to clear mds/syspolicyd/amfid wedges if needed."
+	@echo "                                       Accepts the same JB/DEV/SKIP_PROJECT_SETUP/etc. options."
+	@echo "  make setup_machine_install           Install half of setup_machine (ramdisk_build + cfw_install"
+	@echo "                                       + first boot + analysis). Run after setup_machine_prep."
+	@echo "                                       Accepts the same JB/DEV options as the prep half."
 	@echo ""
 	@echo "Setup (one-time):"
 	@echo "  make setup_tools             Install all tools (brew, trustcache, insert_dylib, venv+pymobiledevice3)"
@@ -115,9 +122,16 @@ help:
 # Setup
 # ═══════════════════════════════════════════════════════════════════
 
-.PHONY: setup_machine setup_tools
+.PHONY: setup_machine setup_machine_prep setup_machine_install setup_tools
 
-setup_machine:
+# ── setup_machine variants ────────────────────────────────────────
+# All three targets share the same script + flag plumbing. Only the
+# --phase= value differs; the script itself enforces that --less is
+# incompatible with --phase=prep|install.
+
+# $(call setup_machine_run,PHASE) — run setup_machine.sh with the given
+# phase value. Used by the three .PHONY targets below.
+define setup_machine_run
 	@if count=0; \
 	  [ -n "$(filter 1 true yes YES TRUE,$(JB))" ] && count=$$((count+1)); \
 	  [ -n "$(filter 1 true yes YES TRUE,$(DEV))" ] && count=$$((count+1)); \
@@ -131,10 +145,26 @@ setup_machine:
 	NO_BINPACK="$(NO_BINPACK)" \
 	NO_VPHONED="$(NO_VPHONED)" \
 	zsh $(SCRIPTS)/setup_machine.sh \
+		--phase=$(1) \
 		$(if $(filter 1 true yes YES TRUE,$(JB)),--jb,) \
 		$(if $(filter 1 true yes YES TRUE,$(DEV)),--dev,) \
 		$(if $(filter 1 true yes YES TRUE,$(LESS)),--less,) \
 		$(if $(filter 1 true yes YES TRUE,$(SKIP_PROJECT_SETUP)),--skip-project-setup,)
+endef
+
+setup_machine:
+	$(call setup_machine_run,all)
+
+# Prep half — runs project setup, firmware prep/patch, and DFU restore,
+# then stops. Designed so the user can reboot the host before the heavy
+# ldid + DMG work in setup_machine_install.
+setup_machine_prep:
+	$(call setup_machine_run,prep)
+
+# Install half — assumes setup_machine_prep already populated vm/. The
+# script's preflight will error early if firmware artifacts are missing.
+setup_machine_install:
+	$(call setup_machine_run,install)
 
 setup_tools:
 	VARIANT=$(VARIANT) zsh $(SCRIPTS)/setup_tools.sh
