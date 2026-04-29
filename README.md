@@ -264,12 +264,13 @@ make boot EXTRA_ARGS=--tcp-workaround
 ```
 
 `vphone-cli` itself stays unprivileged. After the VM has started, it launches
-the same helper via `sudo` and auto-detects the Virtualization shared bridge;
-`boot.sh` warms the sudo credential cache before boot so this path is usually
-silent. Only the privileged helper (`pfctl` rule install / flush, `/dev/pf` +
-`DIOCNATLOOK` queries, and the userspace TCP relay) runs as root. The helper is
-told the parent's pid via `WATCH_PID`, so if vphone-cli exits or crashes the
-helper tears the `pf` anchor down on its own — no launchd, no leftover rules.
+the same helper via `sudo`; bridge detection stays inside
+`scripts/vm_tproxy_start.sh`, matching the manual path. `boot.sh` warms the
+sudo credential cache before boot so this path is usually silent. Only the
+privileged helper (`pfctl` rule install / flush, `/dev/pf` + `DIOCNATLOOK`
+queries, and the userspace TCP relay) runs as root. The helper is told the
+parent's pid via `WATCH_PID`, so if vphone-cli exits or crashes the helper tears
+the `pf` anchor down on its own — no launchd, no leftover rules.
 
 Notes:
 
@@ -277,6 +278,10 @@ Notes:
 - The helper inherits the same auto-detection used by the older standalone
   scripts; on a non-standard host you can still override `LISTEN_ADDR` /
   `PF_INTERFACE` via env vars.
+- A "TCP Workaround Diagnostics" window opens when the flag is used. If the
+  workaround does not connect, use its Copy button and include that text in the
+  report; it contains the helper path, cwd, bridge candidate, helper output, and
+  `scripts/vm_tproxy_start.sh status` output.
 - If you prefer to drive the helper outside of `vphone-cli` (e.g. for
   debugging), `scripts/vm_tproxy_start.sh start|stop|status` still works as
   before.

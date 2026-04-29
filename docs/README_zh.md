@@ -221,18 +221,21 @@ make boot EXTRA_ARGS=--tcp-workaround
 ```
 
 `vphone-cli` 本身仍以普通用户运行。VM 启动后，它会通过 `sudo` 拉起同一个
-helper，并自动探测 Virtualization shared bridge；`boot.sh` 会在启动前刷新
-sudo credential cache，所以通常不会在 VM 启动中途再次弹密码。真正需要 root
-的部分（`pfctl` 规则装载/清理、`/dev/pf` + `DIOCNATLOOK` 查询、用户态 TCP
-转发）才在 helper 里以 root 跑。helper 通过 `WATCH_PID` 监听父进程，一旦
-vphone-cli 退出或崩溃，它会自行拆掉 `pf` anchor —— 不依赖 launchd，也不会
-留下残余规则。
+helper；bridge 探测仍留在 `scripts/vm_tproxy_start.sh` 里，和手动路径保持
+一致。`boot.sh` 会在启动前刷新 sudo credential cache，所以通常不会在 VM
+启动中途再次弹密码。真正需要 root 的部分（`pfctl` 规则装载/清理、`/dev/pf`
+和 `DIOCNATLOOK` 查询、用户态 TCP 转发）才在 helper 里以 root 跑。helper
+通过 `WATCH_PID` 监听父进程，一旦 vphone-cli 退出或崩溃，它会自行拆掉 `pf`
+anchor —— 不依赖 launchd，也不会留下残余规则。
 
 注意：
 
 - 这个绕行方案只代理 IPv4 TCP，不处理 UDP / QUIC。
 - helper 沿用旧版独立脚本的自动探测逻辑；少数特殊网络环境下，仍可以通过
   `LISTEN_ADDR` / `PF_INTERFACE` 环境变量手动覆盖。
+- 使用该参数时会打开一个 "TCP Workaround Diagnostics" 窗口。若联网仍失败，
+  点 Copy 后把内容带回来；里面包含 helper 路径、cwd、bridge 候选、helper
+  输出，以及 `scripts/vm_tproxy_start.sh status` 输出。
 - 如果你想绕开 `vphone-cli` 单独调试 helper，仍然可以直接跑
   `scripts/vm_tproxy_start.sh start|stop|status`，行为没变。
 

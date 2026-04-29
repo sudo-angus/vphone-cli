@@ -318,6 +318,24 @@
   - Guest TCP attempts produce the same `scripts/vm_tproxy.py` connection logs
     seen in the manual working path.
 
+## Host Network Workaround — Manual-Path Diagnostics (2026-04-29)
+
+- Follow-up testing still showed no guest connectivity from the integrated
+  `--tcp-workaround` path, while the standalone `scripts/vm_tproxy_start.sh`
+  path remained known-good.
+- To reduce behavioral differences, `VPhoneTransparentProxy` no longer exports
+  Swift-detected `PF_INTERFACE` / `LISTEN_ADDR` into the helper. Swift still
+  records its bridge candidate for diagnostics, but the helper now performs the
+  same bridge auto-detection it uses when started manually.
+- Added a non-modal "TCP Workaround Diagnostics" window when
+  `--tcp-workaround` is used. The window captures:
+  - build hash, helper path, current working directory, and launch command
+  - Swift's bridge candidate without forcing it into the helper
+  - helper stdout/stderr, including `sudo` and `vm_tproxy_start.sh` output
+  - a post-launch `scripts/vm_tproxy_start.sh status` probe
+- The diagnostics window has a Copy button so remote validation can return a
+  concrete state dump instead of only "networking works / does not work".
+
 ## Automation Notes (2026-03-06)
 
 - `scripts/setup_machine.sh` non-interactive flow fix: renamed local variable `status` to `boot_state` in first-boot log wait and boot-analysis wait helpers to avoid zsh `status` read-only special parameter collision.
