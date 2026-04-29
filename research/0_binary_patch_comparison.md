@@ -355,6 +355,11 @@
   `lsof`, and waits for the port to be free before loading pf and starting the
   replacement proxy. `status` also reports current listeners on the configured
   proxy port.
+- Follow-up validation hit a shell-control bug in that listener check: `lsof`
+  returns non-zero when no listener remains, and under `set -euo pipefail` that
+  made `wait_for_port_release` abort exactly after the stale listener was
+  cleared. `listener_pids` now normalizes "no listener" to a successful empty
+  result.
 - Clean integrated starts can race Virtualization's bridge creation; endpoint
   resolution now retries briefly before failing, while leaving `vm_tproxy.py`
   and the pf/DIOCNATLOOK forwarding path unchanged.

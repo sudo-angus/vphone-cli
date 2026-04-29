@@ -202,7 +202,7 @@ listener_pids() {
     local port="$2"
 
     command -v lsof >/dev/null 2>&1 || return 0
-    lsof -nP -t -iTCP@"${addr}:${port}" -sTCP:LISTEN 2>/dev/null | sort -u
+    { lsof -nP -t -iTCP@"${addr}:${port}" -sTCP:LISTEN 2>/dev/null || true; } | sort -u
 }
 
 clear_proxy_listeners() {
