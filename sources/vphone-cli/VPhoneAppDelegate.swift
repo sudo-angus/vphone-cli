@@ -76,11 +76,11 @@ class VPhoneAppDelegate: NSObject, NSApplicationDelegate {
         let vm = try VPhoneVirtualMachine(options: options)
         self.vm = vm
 
+        try await vm.start(forceDFU: cli.dfu)
+
         if cli.tcpWorkaround {
             startTransparentProxy()
         }
-
-        try await vm.start(forceDFU: cli.dfu)
 
         let control = VPhoneControl(variant: options.variant)
         self.control = control

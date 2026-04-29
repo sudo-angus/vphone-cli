@@ -220,12 +220,13 @@ make boot
 make boot EXTRA_ARGS=--tcp-workaround
 ```
 
-`vphone-cli` 本身仍以普通用户运行。启动时它会自动探测 Virtualization
-shared bridge，并通过系统的标准管理员授权框申请一次提权；真正需要 root
-的部分（`pfctl` 规则装载/清理、`/dev/pf` + `DIOCNATLOOK` 查询、用户态
-TCP 转发）才在 helper 里以 root 跑。helper 通过 `WATCH_PID` 监听父进程，
-一旦 vphone-cli 退出或崩溃，它会自行拆掉 `pf` anchor —— 不依赖 launchd，
-也不会留下残余规则。
+`vphone-cli` 本身仍以普通用户运行。VM 启动后，它会通过 `sudo` 拉起同一个
+helper，并自动探测 Virtualization shared bridge；`boot.sh` 会在启动前刷新
+sudo credential cache，所以通常不会在 VM 启动中途再次弹密码。真正需要 root
+的部分（`pfctl` 规则装载/清理、`/dev/pf` + `DIOCNATLOOK` 查询、用户态 TCP
+转发）才在 helper 里以 root 跑。helper 通过 `WATCH_PID` 监听父进程，一旦
+vphone-cli 退出或崩溃，它会自行拆掉 `pf` anchor —— 不依赖 launchd，也不会
+留下残余规则。
 
 注意：
 

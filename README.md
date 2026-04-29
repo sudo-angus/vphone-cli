@@ -263,13 +263,13 @@ loses outbound TCP connectivity under `VZNATNetworkDeviceAttachment()`, pass
 make boot EXTRA_ARGS=--tcp-workaround
 ```
 
-`vphone-cli` itself stays unprivileged. On startup it auto-detects the
-Virtualization shared bridge and asks for a one-time admin password via
-the standard system prompt; only the privileged helper (`pfctl` rule install /
-flush, `/dev/pf` + `DIOCNATLOOK` queries, and the userspace TCP relay) runs as
-root. The helper is told the parent's pid via `WATCH_PID`, so if vphone-cli
-exits or crashes the helper tears the `pf` anchor down on its own — no
-launchd, no leftover rules.
+`vphone-cli` itself stays unprivileged. After the VM has started, it launches
+the same helper via `sudo` and auto-detects the Virtualization shared bridge;
+`boot.sh` warms the sudo credential cache before boot so this path is usually
+silent. Only the privileged helper (`pfctl` rule install / flush, `/dev/pf` +
+`DIOCNATLOOK` queries, and the userspace TCP relay) runs as root. The helper is
+told the parent's pid via `WATCH_PID`, so if vphone-cli exits or crashes the
+helper tears the `pf` anchor down on its own — no launchd, no leftover rules.
 
 Notes:
 

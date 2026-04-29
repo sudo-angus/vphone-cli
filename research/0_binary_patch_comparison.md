@@ -277,27 +277,46 @@
   the boot path drives the existing host helper end-to-end so the user no
   longer needs to start `scripts/vm_tproxy_start.sh` in a second terminal.
 - Privilege split is preserved: the Swift host process keeps running as the
-  unprivileged user. The privileged helper (loaded via
-  `osascript do shell script ... with administrator privileges`) is the only
-  thing that runs as root, and only handles `pfctl` rule install/flush,
-  `/dev/pf` + `DIOCNATLOOK` queries, and the userspace TCP relay.
+  unprivileged user. The privileged helper (currently launched through `sudo`,
+  with `boot.sh` warming the credential cache first) is the only thing that runs
+  as root, and only handles `pfctl` rule install/flush, `/dev/pf` +
+  `DIOCNATLOOK` queries, and the userspace TCP relay.
 - New file `sources/vphone-cli/VPhoneTransparentProxy.swift` re-implements the
   shared-bridge auto-detect (first `bridge*` with IPv4 + a `vmenet*` member)
   in Swift, then exports that to the helper via env vars (`PF_INTERFACE`,
   `LISTEN_ADDR`).
-- New `WATCH_PID` env var on `scripts/vm_tproxy_start.sh` puts the helper into
+- `WATCH_PID` env var on `scripts/vm_tproxy_start.sh` puts the helper into
   daemon-watchdog mode: it polls `kill -0 $WATCH_PID` and, when vphone-cli
   exits, immediately SIGTERMs the relay and flushes the `pf` anchor. This is
-  the failsafe when osascript does not propagate SIGTERM through to the sudo
-  child.
+  the failsafe when a parent-process signal does not propagate into the
+  privileged helper.
 - All previous stability fixes (no idle-disconnect, blocking relay, keepalive,
   bridge auto-detect) are retained; the manual `start|stop|status` interface
   on the script still works for debugging.
 - Boot lifecycle hooks: `VPhoneAppDelegate.startVirtualMachine` starts the
-  helper before `vm.start(...)`, and `applicationWillTerminate` calls
+  helper after `vm.start(...)`, and `applicationWillTerminate` calls
   `transparentProxy?.stop()` so SIGINT / window-close cleanly tears it down.
 - No launchd, no sudoers entry, no persistent state — privileges are dropped
   the moment the boot exits.
+
+## Host Network Workaround — Lifecycle Fix (2026-04-29)
+
+- Follow-up after testing showed the 2026-04-28 integration could appear to
+  start but still leave guest networking broken.
+- The standalone `scripts/vm_tproxy_start.sh` path is known-good when started
+  manually, so this revision deliberately leaves the helper's pf rules and
+  `DIOCNATLOOK` implementation unchanged.
+- The integration bug fixed here is startup ordering: `vphone-cli` previously
+  launched the helper before `vm.start(...)`, so the helper could auto-detect
+  before Virtualization had created the `bridge*` + `vmenet*` endpoint. The
+  `--tcp-workaround` lifecycle now starts the same helper immediately after
+  `vm.start(...)` returns, matching the manual flow's prerequisite more closely
+  while still starting early in guest boot.
+- Expected validation after boot with `--tcp-workaround`:
+  - `scripts/vm_tproxy_start.sh status` shows the same anchor/rules behavior as
+    the manually-started helper.
+  - Guest TCP attempts produce the same `scripts/vm_tproxy.py` connection logs
+    seen in the manual working path.
 
 ## Automation Notes (2026-03-06)
 
