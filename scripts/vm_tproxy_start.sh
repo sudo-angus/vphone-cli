@@ -21,8 +21,36 @@ CONNECT_TIMEOUT="${CONNECT_TIMEOUT:-30}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 WATCH_PID="${WATCH_PID:-}"
 WATCH_INTERVAL="${WATCH_INTERVAL:-2}"
+ENDPOINT_TIMEOUT="${ENDPOINT_TIMEOUT:-60}"
+ENDPOINT_INTERVAL="${ENDPOINT_INTERVAL:-1}"
+REPLACE_EXISTING="${REPLACE_EXISTING:-0}"
+STOP_TIMEOUT="${STOP_TIMEOUT:-5}"
+PORT_RELEASE_TIMEOUT="${PORT_RELEASE_TIMEOUT:-5}"
 proxy_pid=""
 watchdog_pid=""
+
+pid_exists() {
+    local pid="$1"
+    [[ -n "$pid" ]] && ps -p "$pid" -o pid= >/dev/null 2>&1
+}
+
+is_truthy() {
+    [[ "$1" == "1" || "$1" == "true" || "$1" == "yes" ]]
+}
+
+wait_for_pid_exit() {
+    local pid="$1"
+    local timeout="${2:-$STOP_TIMEOUT}"
+    local waited=0
+
+    while pid_exists "$pid"; do
+        if (( waited >= timeout )); then
+            return 1
+        fi
+        sleep 1
+        (( ++waited ))
+    done
+}
 
 require_root() {
     if [[ "$(id -u)" -ne 0 ]]; then
@@ -52,8 +80,7 @@ detect_pf_interface() {
     )"
 
     if [[ -z "$detected" ]]; then
-        echo "[tproxy] failed to find an interface with address $LISTEN_ADDR; set PF_INTERFACE=..." >&2
-        exit 1
+        return 1
     fi
 
     echo "$detected"
@@ -72,8 +99,7 @@ detect_listen_addr_for_interface() {
     )"
 
     if [[ -z "$detected" ]]; then
-        echo "[tproxy] interface '$target_interface' has no IPv4 address; set LISTEN_ADDR=..." >&2
-        exit 1
+        return 1
     fi
 
     echo "$detected"
@@ -106,7 +132,7 @@ detect_vmnet_bridge_endpoint() {
     '
 }
 
-resolve_listen_endpoint() {
+resolve_listen_endpoint_once() {
     local resolved_interface="$PF_INTERFACE"
     local resolved_addr="$LISTEN_ADDR"
     local auto_endpoint=""
@@ -117,13 +143,13 @@ resolve_listen_endpoint() {
     fi
 
     if [[ -n "$resolved_addr" ]]; then
-        resolved_interface="$(detect_pf_interface)"
+        resolved_interface="$(detect_pf_interface)" || return 1
         echo "$resolved_interface|$resolved_addr"
         return
     fi
 
     if [[ -n "$resolved_interface" ]]; then
-        resolved_addr="$(detect_listen_addr_for_interface "$resolved_interface")"
+        resolved_addr="$(detect_listen_addr_for_interface "$resolved_interface")" || return 1
         echo "$resolved_interface|$resolved_addr"
         return
     fi
@@ -134,8 +160,27 @@ resolve_listen_endpoint() {
         return
     fi
 
-    echo "[tproxy] failed to auto-detect the Virtualization shared bridge; set LISTEN_ADDR=... and/or PF_INTERFACE=..." >&2
-    exit 1
+    return 1
+}
+
+resolve_listen_endpoint() {
+    local deadline=$((SECONDS + ENDPOINT_TIMEOUT))
+    local endpoint=""
+
+    while true; do
+        if endpoint="$(resolve_listen_endpoint_once)"; then
+            echo "$endpoint"
+            return
+        fi
+
+        if (( SECONDS >= deadline )); then
+            echo "[tproxy] failed to auto-detect the Virtualization shared bridge within ${ENDPOINT_TIMEOUT}s; set LISTEN_ADDR=... and/or PF_INTERFACE=..." >&2
+            exit 1
+        fi
+
+        echo "[tproxy] waiting for Virtualization shared bridge endpoint..." >&2
+        sleep "$ENDPOINT_INTERVAL"
+    done
 }
 
 load_anchor() {
@@ -152,13 +197,70 @@ flush_anchor() {
     echo "" | pfctl -a "$ANCHOR" -f - 2>/dev/null || true
 }
 
+listener_pids() {
+    local addr="$1"
+    local port="$2"
+
+    command -v lsof >/dev/null 2>&1 || return 0
+    { lsof -nP -t -iTCP@"${addr}:${port}" -sTCP:LISTEN 2>/dev/null || true; } | sort -u
+}
+
+clear_proxy_listeners() {
+    local addr="$1"
+    local port="$2"
+    local pid
+    local cmd
+
+    for pid in $(listener_pids "$addr" "$port"); do
+        cmd="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+        if [[ "$cmd" != *"vm_tproxy.py"* ]]; then
+            echo "[tproxy] $addr:$port is already used by pid=$pid ($cmd); not replacing a non-vphone listener" >&2
+            exit 1
+        fi
+
+        echo "[tproxy] replacing stale listener pid=$pid on $addr:$port"
+        kill "$pid" 2>/dev/null || true
+        if ! wait_for_pid_exit "$pid" "$STOP_TIMEOUT"; then
+            echo "[tproxy] stale listener pid=$pid did not exit after SIGTERM; sending SIGKILL"
+            kill -KILL "$pid" 2>/dev/null || true
+            wait_for_pid_exit "$pid" "$STOP_TIMEOUT" || true
+        fi
+    done
+}
+
+wait_for_port_release() {
+    local addr="$1"
+    local port="$2"
+    local waited=0
+    local pids=""
+
+    while true; do
+        pids="$(listener_pids "$addr" "$port" | tr '\n' ' ')"
+        if [[ -z "${pids// /}" ]]; then
+            return
+        fi
+
+        if (( waited >= PORT_RELEASE_TIMEOUT )); then
+            echo "[tproxy] $addr:$port is still busy after ${PORT_RELEASE_TIMEOUT}s (pids: ${pids})" >&2
+            exit 1
+        fi
+
+        sleep 1
+        (( ++waited ))
+    done
+}
+
 kill_proxy() {
     if [[ -f "$PID_FILE" ]]; then
         local pid
         pid="$(<"$PID_FILE")"
-        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+        if pid_exists "$pid"; then
             kill "$pid" 2>/dev/null || true
-            wait "$pid" 2>/dev/null || true
+            if ! wait_for_pid_exit "$pid" "$STOP_TIMEOUT"; then
+                echo "[tproxy] proxy pid=$pid did not exit after SIGTERM; sending SIGKILL"
+                kill -KILL "$pid" 2>/dev/null || true
+                wait_for_pid_exit "$pid" "$STOP_TIMEOUT" || true
+            fi
         fi
         rm -f "$PID_FILE"
     fi
@@ -187,13 +289,21 @@ status() {
     local pid=""
     if [[ -f "$PID_FILE" ]]; then
         pid="$(<"$PID_FILE")"
-        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+        if pid_exists "$pid"; then
             running="yes"
         fi
     fi
 
     echo "[tproxy] pid_file=$PID_FILE"
     echo "[tproxy] proxy_running=$running${pid:+ (pid=$pid)}"
+    if command -v lsof >/dev/null 2>&1; then
+        local listeners
+        listeners="$(lsof -nP -iTCP:"$LISTEN_PORT" -sTCP:LISTEN 2>/dev/null || true)"
+        if [[ -n "$listeners" ]]; then
+            printf '%s\n' "$listeners" \
+                | awk 'NR > 1 { printf("[tproxy] listener command=%s pid=%s name=%s\n", $1, $2, $9) }'
+        fi
+    fi
     pfctl -a "$ANCHOR" -s rules 2>/dev/null || true
 }
 
@@ -203,11 +313,18 @@ start() {
     if [[ -f "$PID_FILE" ]]; then
         local existing_pid
         existing_pid="$(<"$PID_FILE")"
-        if [[ -n "$existing_pid" ]] && kill -0 "$existing_pid" 2>/dev/null; then
-            echo "[tproxy] already running (pid=$existing_pid)" >&2
-            exit 1
+        if pid_exists "$existing_pid"; then
+            if is_truthy "$REPLACE_EXISTING"; then
+                echo "[tproxy] existing proxy found (pid=$existing_pid); replacing it"
+                kill_proxy
+                flush_anchor
+            else
+                echo "[tproxy] already running; reusing existing proxy (pid=$existing_pid)"
+                exit 0
+            fi
+        else
+            rm -f "$PID_FILE"
         fi
-        rm -f "$PID_FILE"
     fi
 
     local endpoint
@@ -216,6 +333,13 @@ start() {
     pf_interface="${endpoint%%|*}"
     LISTEN_ADDR="${endpoint#*|}"
     echo "[tproxy] using listen_addr=$LISTEN_ADDR interface=$pf_interface"
+    if is_truthy "$REPLACE_EXISTING"; then
+        clear_proxy_listeners "$LISTEN_ADDR" "$LISTEN_PORT"
+    elif [[ -n "$(listener_pids "$LISTEN_ADDR" "$LISTEN_PORT" | tr '\n' ' ')" ]]; then
+        echo "[tproxy] $LISTEN_ADDR:$LISTEN_PORT is already in use; stop the existing helper first" >&2
+        exit 1
+    fi
+    wait_for_port_release "$LISTEN_ADDR" "$LISTEN_PORT"
     load_anchor "$pf_interface"
 
     echo "[tproxy] pf anchor loaded. starting proxy..."

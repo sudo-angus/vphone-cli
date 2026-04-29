@@ -7,11 +7,11 @@ import Foundation
 /// inherited controlling TTY. If the user already primed sudo's credential
 /// cache (e.g. via `boot.sh` running `make amfidont_allow_vphone` first), this
 /// is silent; otherwise sudo prompts on /dev/tty. The actually-privileged
-/// work — `pfctl` anchor load/flush, `/dev/pf` + `DIOCNATLOOK` queries, and
-/// the userspace TCP relay — stays in `scripts/vm_tproxy.py` +
-/// `scripts/vm_tproxy_start.sh`. The helper is told our pid via `WATCH_PID`
-/// so it tears the `pf` anchor down and exits if vphone-cli dies without
-/// sending SIGTERM.
+/// work — bridge detection, `pfctl` anchor load/flush, `/dev/pf` +
+/// `DIOCNATLOOK` queries, and the userspace TCP relay — stays in
+/// `scripts/vm_tproxy.py` + `scripts/vm_tproxy_start.sh`, matching the manual
+/// helper path. The helper is told our pid via `WATCH_PID` so it tears the
+/// `pf` anchor down and exits if vphone-cli dies without sending SIGTERM.
 @MainActor
 final class VPhoneTransparentProxy {
     struct BridgeEndpoint: Sendable {
@@ -61,22 +61,17 @@ final class VPhoneTransparentProxy {
             return
         }
 
-        let endpoint: BridgeEndpoint?
         do {
-            endpoint = try Self.detectBridgeEndpoint()
+            let endpoint = try Self.detectBridgeEndpoint()
+            print("[tproxy] detected bridge candidate interface=\(endpoint.interface) listen_addr=\(endpoint.address)")
         } catch {
-            print("[tproxy] bridge auto-detect failed: \(error.localizedDescription); helper will retry")
-            endpoint = nil
+            print("[tproxy] bridge candidate unavailable: \(error.localizedDescription); helper will wait and retry")
         }
-
-        if let endpoint {
-            print("[tproxy] detected bridge interface=\(endpoint.interface) listen_addr=\(endpoint.address)")
-        }
+        print("[tproxy] helper will auto-detect bridge; Swift is not exporting PF_INTERFACE/LISTEN_ADDR")
 
         let parentPid = ProcessInfo.processInfo.processIdentifier
         let inner = Self.buildInnerCommand(
             scriptPath: scriptURL.path,
-            endpoint: endpoint,
             parentPid: parentPid
         )
 
@@ -122,14 +117,12 @@ final class VPhoneTransparentProxy {
     }
 
     func stop() {
+        runStopHelper()
+
         guard let p = process else { return }
         process = nil
         if p.isRunning {
-            p.terminate()
-            // Watchdog inside the helper script also cleans up if our SIGTERM
-            // does not propagate through osascript -> sudo, so this best-effort
-            // wait is enough.
-            p.waitUntilExit()
+            print("[tproxy] helper process still running; WATCH_PID cleanup remains armed")
         }
         stdoutPipe?.fileHandleForReading.readabilityHandler = nil
         stderrPipe?.fileHandleForReading.readabilityHandler = nil
@@ -207,15 +200,11 @@ final class VPhoneTransparentProxy {
 
     private static func buildInnerCommand(
         scriptPath: String,
-        endpoint: BridgeEndpoint?,
         parentPid: Int32
     ) -> String {
         var parts: [String] = []
         parts.append("WATCH_PID=\(parentPid)")
-        if let endpoint {
-            parts.append("PF_INTERFACE=\(shellEscape(endpoint.interface))")
-            parts.append("LISTEN_ADDR=\(shellEscape(endpoint.address))")
-        }
+        parts.append("REPLACE_EXISTING=1")
         parts.append("/bin/zsh")
         parts.append(shellEscape(scriptPath))
         parts.append("start")
@@ -226,5 +215,30 @@ final class VPhoneTransparentProxy {
         // Wrap in single quotes; close, escape embedded ', re-open.
         let escaped = s.replacingOccurrences(of: "'", with: "'\\''")
         return "'\(escaped)'"
+    }
+
+    private func runStopHelper() {
+        guard FileManager.default.fileExists(atPath: scriptURL.path) else { return }
+
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
+        p.arguments = ["-n", "/bin/zsh", scriptURL.path, "stop"]
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = pipe
+
+        do {
+            try p.run()
+            p.waitUntilExit()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            if let text = String(data: data, encoding: .utf8), !text.isEmpty {
+                print(text.trimmingCharacters(in: .whitespacesAndNewlines))
+            }
+            if p.terminationStatus != 0 {
+                print("[tproxy] stop helper exited with status \(p.terminationStatus); WATCH_PID cleanup may still handle teardown")
+            }
+        } catch {
+            print("[tproxy] stop helper failed: \(error.localizedDescription)")
+        }
     }
 }

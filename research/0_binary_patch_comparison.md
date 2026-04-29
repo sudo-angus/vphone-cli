@@ -281,10 +281,10 @@
   with `boot.sh` warming the credential cache first) is the only thing that runs
   as root, and only handles `pfctl` rule install/flush, `/dev/pf` +
   `DIOCNATLOOK` queries, and the userspace TCP relay.
-- New file `sources/vphone-cli/VPhoneTransparentProxy.swift` re-implements the
-  shared-bridge auto-detect (first `bridge*` with IPv4 + a `vmenet*` member)
-  in Swift, then exports that to the helper via env vars (`PF_INTERFACE`,
-  `LISTEN_ADDR`).
+- New file `sources/vphone-cli/VPhoneTransparentProxy.swift` launches the
+  helper from the boot lifecycle. Swift may log its own bridge candidate, but
+  the helper remains responsible for bridge auto-detection so the integrated
+  path matches the manually-started `scripts/vm_tproxy_start.sh` path.
 - `WATCH_PID` env var on `scripts/vm_tproxy_start.sh` puts the helper into
   daemon-watchdog mode: it polls `kill -0 $WATCH_PID` and, when vphone-cli
   exits, immediately SIGTERMs the relay and flushes the `pf` anchor. This is
@@ -317,6 +317,31 @@
     the manually-started helper.
   - Guest TCP attempts produce the same `scripts/vm_tproxy.py` connection logs
     seen in the manual working path.
+
+## Host Network Workaround — Clean Lifecycle Merge (2026-04-29)
+
+- Validated integrated boot on the diagnostic branch, then merged the clean
+  behavior without the diagnostic window.
+- `VPhoneTransparentProxy` no longer exports Swift-detected `PF_INTERFACE` /
+  `LISTEN_ADDR`; `scripts/vm_tproxy_start.sh` does the same bridge discovery it
+  uses in manual runs.
+- Integrated starts pass `REPLACE_EXISTING=1`, replacing any leftover proxy
+  from a previous boot so the current vphone-cli process owns the helper
+  lifecycle.
+- `scripts/vm_tproxy_start.sh` now:
+  - uses `ps -p` for pid existence so root-owned proxies are not misreported
+    as stopped by non-root status probes
+  - retries bridge endpoint discovery for clean boots where Virtualization
+    creates `bridge*` / `vmenet*` shortly after `vm.start(...)`
+  - waits for stale `vm_tproxy.py` listeners on `LISTEN_ADDR:LISTEN_PORT` to
+    release before starting a replacement, escalating to SIGKILL only for
+    stale `vm_tproxy.py` listeners and refusing to replace non-vphone listeners
+  - reports current listeners in `status`
+- On shutdown, Swift runs a best-effort non-interactive `sudo ... stop`; if
+  sudo cache is no longer valid, the root helper remains alive until the
+  existing `WATCH_PID` watchdog observes vphone-cli exit and tears itself down.
+- `vm_tproxy.py` forwarding, pf rule contents, and DIOCNATLOOK logic are left
+  unchanged from the known-good manual helper path.
 
 ## Automation Notes (2026-03-06)
 
