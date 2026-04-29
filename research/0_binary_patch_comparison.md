@@ -347,6 +347,14 @@
   Swift runs a best-effort non-interactive `sudo ... stop`; if that fails, it
   leaves the privileged helper process alive so the existing `WATCH_PID`
   watchdog can tear down after the vphone-cli pid disappears.
+- Follow-up diagnostics showed replacement could still race the old listener:
+  the pid file was removed and the pf anchor flushed, but `vm_tproxy.py` still
+  owned `192.168.64.1:3129` long enough for the new proxy to fail with
+  `OSError: [Errno 48] Address already in use`. The wrapper now waits for the
+  old pid to exit, escalates to SIGKILL if needed, checks the listen socket with
+  `lsof`, and waits for the port to be free before loading pf and starting the
+  replacement proxy. `status` also reports current listeners on the configured
+  proxy port.
 - Clean integrated starts can race Virtualization's bridge creation; endpoint
   resolution now retries briefly before failing, while leaving `vm_tproxy.py`
   and the pf/DIOCNATLOOK forwarding path unchanged.

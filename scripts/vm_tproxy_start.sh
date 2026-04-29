@@ -24,6 +24,8 @@ WATCH_INTERVAL="${WATCH_INTERVAL:-2}"
 ENDPOINT_TIMEOUT="${ENDPOINT_TIMEOUT:-60}"
 ENDPOINT_INTERVAL="${ENDPOINT_INTERVAL:-1}"
 REPLACE_EXISTING="${REPLACE_EXISTING:-0}"
+STOP_TIMEOUT="${STOP_TIMEOUT:-5}"
+PORT_RELEASE_TIMEOUT="${PORT_RELEASE_TIMEOUT:-5}"
 proxy_pid=""
 watchdog_pid=""
 
@@ -34,6 +36,20 @@ pid_exists() {
 
 is_truthy() {
     [[ "$1" == "1" || "$1" == "true" || "$1" == "yes" ]]
+}
+
+wait_for_pid_exit() {
+    local pid="$1"
+    local timeout="${2:-$STOP_TIMEOUT}"
+    local waited=0
+
+    while pid_exists "$pid"; do
+        if (( waited >= timeout )); then
+            return 1
+        fi
+        sleep 1
+        (( ++waited ))
+    done
 }
 
 require_root() {
@@ -181,13 +197,70 @@ flush_anchor() {
     echo "" | pfctl -a "$ANCHOR" -f - 2>/dev/null || true
 }
 
+listener_pids() {
+    local addr="$1"
+    local port="$2"
+
+    command -v lsof >/dev/null 2>&1 || return 0
+    lsof -nP -t -iTCP@"${addr}:${port}" -sTCP:LISTEN 2>/dev/null | sort -u
+}
+
+clear_proxy_listeners() {
+    local addr="$1"
+    local port="$2"
+    local pid
+    local cmd
+
+    for pid in $(listener_pids "$addr" "$port"); do
+        cmd="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+        if [[ "$cmd" != *"vm_tproxy.py"* ]]; then
+            echo "[tproxy] $addr:$port is already used by pid=$pid ($cmd); not replacing a non-vphone listener" >&2
+            exit 1
+        fi
+
+        echo "[tproxy] replacing stale listener pid=$pid on $addr:$port"
+        kill "$pid" 2>/dev/null || true
+        if ! wait_for_pid_exit "$pid" "$STOP_TIMEOUT"; then
+            echo "[tproxy] stale listener pid=$pid did not exit after SIGTERM; sending SIGKILL"
+            kill -KILL "$pid" 2>/dev/null || true
+            wait_for_pid_exit "$pid" "$STOP_TIMEOUT" || true
+        fi
+    done
+}
+
+wait_for_port_release() {
+    local addr="$1"
+    local port="$2"
+    local waited=0
+    local pids=""
+
+    while true; do
+        pids="$(listener_pids "$addr" "$port" | tr '\n' ' ')"
+        if [[ -z "${pids// /}" ]]; then
+            return
+        fi
+
+        if (( waited >= PORT_RELEASE_TIMEOUT )); then
+            echo "[tproxy] $addr:$port is still busy after ${PORT_RELEASE_TIMEOUT}s (pids: ${pids})" >&2
+            exit 1
+        fi
+
+        sleep 1
+        (( ++waited ))
+    done
+}
+
 kill_proxy() {
     if [[ -f "$PID_FILE" ]]; then
         local pid
         pid="$(<"$PID_FILE")"
         if pid_exists "$pid"; then
             kill "$pid" 2>/dev/null || true
-            wait "$pid" 2>/dev/null || true
+            if ! wait_for_pid_exit "$pid" "$STOP_TIMEOUT"; then
+                echo "[tproxy] proxy pid=$pid did not exit after SIGTERM; sending SIGKILL"
+                kill -KILL "$pid" 2>/dev/null || true
+                wait_for_pid_exit "$pid" "$STOP_TIMEOUT" || true
+            fi
         fi
         rm -f "$PID_FILE"
     fi
@@ -223,6 +296,14 @@ status() {
 
     echo "[tproxy] pid_file=$PID_FILE"
     echo "[tproxy] proxy_running=$running${pid:+ (pid=$pid)}"
+    if command -v lsof >/dev/null 2>&1; then
+        local listeners
+        listeners="$(lsof -nP -iTCP:"$LISTEN_PORT" -sTCP:LISTEN 2>/dev/null || true)"
+        if [[ -n "$listeners" ]]; then
+            printf '%s\n' "$listeners" \
+                | awk 'NR > 1 { printf("[tproxy] listener command=%s pid=%s name=%s\n", $1, $2, $9) }'
+        fi
+    fi
     pfctl -a "$ANCHOR" -s rules 2>/dev/null || true
 }
 
@@ -252,6 +333,13 @@ start() {
     pf_interface="${endpoint%%|*}"
     LISTEN_ADDR="${endpoint#*|}"
     echo "[tproxy] using listen_addr=$LISTEN_ADDR interface=$pf_interface"
+    if is_truthy "$REPLACE_EXISTING"; then
+        clear_proxy_listeners "$LISTEN_ADDR" "$LISTEN_PORT"
+    elif [[ -n "$(listener_pids "$LISTEN_ADDR" "$LISTEN_PORT" | tr '\n' ' ')" ]]; then
+        echo "[tproxy] $LISTEN_ADDR:$LISTEN_PORT is already in use; stop the existing helper first" >&2
+        exit 1
+    fi
+    wait_for_port_release "$LISTEN_ADDR" "$LISTEN_PORT"
     load_anchor "$pf_interface"
 
     echo "[tproxy] pf anchor loaded. starting proxy..."
