@@ -23,12 +23,17 @@ WATCH_PID="${WATCH_PID:-}"
 WATCH_INTERVAL="${WATCH_INTERVAL:-2}"
 ENDPOINT_TIMEOUT="${ENDPOINT_TIMEOUT:-60}"
 ENDPOINT_INTERVAL="${ENDPOINT_INTERVAL:-1}"
+REPLACE_EXISTING="${REPLACE_EXISTING:-0}"
 proxy_pid=""
 watchdog_pid=""
 
 pid_exists() {
     local pid="$1"
     [[ -n "$pid" ]] && ps -p "$pid" -o pid= >/dev/null 2>&1
+}
+
+is_truthy() {
+    [[ "$1" == "1" || "$1" == "true" || "$1" == "yes" ]]
 }
 
 require_root() {
@@ -228,10 +233,17 @@ start() {
         local existing_pid
         existing_pid="$(<"$PID_FILE")"
         if pid_exists "$existing_pid"; then
-            echo "[tproxy] already running; reusing existing proxy (pid=$existing_pid)"
-            exit 0
+            if is_truthy "$REPLACE_EXISTING"; then
+                echo "[tproxy] existing proxy found (pid=$existing_pid); replacing it"
+                kill_proxy
+                flush_anchor
+            else
+                echo "[tproxy] already running; reusing existing proxy (pid=$existing_pid)"
+                exit 0
+            fi
+        else
+            rm -f "$PID_FILE"
         fi
-        rm -f "$PID_FILE"
     fi
 
     local endpoint

@@ -342,6 +342,11 @@
 - `scripts/vm_tproxy_start.sh` now uses `ps -p` for pid existence checks, so
   status probes work for root-owned proxy processes. `start` treats an existing
   live proxy as reusable success instead of exiting with status 1.
+- The integrated Swift launch passes `REPLACE_EXISTING=1`, so a new boot
+  replaces a leftover helper instead of silently depending on it. On shutdown,
+  Swift runs a best-effort non-interactive `sudo ... stop`; if that fails, it
+  leaves the privileged helper process alive so the existing `WATCH_PID`
+  watchdog can tear down after the vphone-cli pid disappears.
 - Clean integrated starts can race Virtualization's bridge creation; endpoint
   resolution now retries briefly before failing, while leaving `vm_tproxy.py`
   and the pf/DIOCNATLOOK forwarding path unchanged.

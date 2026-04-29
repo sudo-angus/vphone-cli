@@ -139,20 +139,18 @@ final class VPhoneTransparentProxy {
     }
 
     func stop() {
+        appendDiagnostic("stop requested")
+        runStopHelper()
+
         guard let p = process else { return }
         process = nil
         if p.isRunning {
-            p.terminate()
-            // Watchdog inside the helper script also cleans up if our SIGTERM
-            // does not propagate through osascript -> sudo, so this best-effort
-            // wait is enough.
-            p.waitUntilExit()
+            appendDiagnostic("helper process still running; leaving WATCH_PID cleanup armed")
         }
         stdoutPipe?.fileHandleForReading.readabilityHandler = nil
         stderrPipe?.fileHandleForReading.readabilityHandler = nil
         stdoutPipe = nil
         stderrPipe = nil
-        appendDiagnostic("stop requested")
     }
 
     // MARK: - Bridge auto-detection
@@ -229,6 +227,7 @@ final class VPhoneTransparentProxy {
     ) -> String {
         var parts: [String] = []
         parts.append("WATCH_PID=\(parentPid)")
+        parts.append("REPLACE_EXISTING=1")
         parts.append("/bin/zsh")
         parts.append(shellEscape(scriptPath))
         parts.append("start")
@@ -296,6 +295,29 @@ final class VPhoneTransparentProxy {
             }
         } catch {
             appendDiagnostic("status probe (\(label)) failed: \(error.localizedDescription)")
+        }
+    }
+
+    private func runStopHelper() {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
+        p.arguments = ["-n", "/bin/zsh", scriptURL.path, "stop"]
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = pipe
+
+        do {
+            try p.run()
+            p.waitUntilExit()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            let text = String(data: data, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            appendDiagnostic("stop helper exit=\(p.terminationStatus)")
+            if !text.isEmpty {
+                appendDiagnostic("stop helper output:\n\(text)")
+            }
+        } catch {
+            appendDiagnostic("stop helper failed: \(error.localizedDescription)")
         }
     }
 }

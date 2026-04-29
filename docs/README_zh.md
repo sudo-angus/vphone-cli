@@ -234,8 +234,9 @@ anchor —— 不依赖 launchd，也不会留下残余规则。
 - helper 沿用旧版独立脚本的自动探测逻辑；少数特殊网络环境下，仍可以通过
   `LISTEN_ADDR` / `PF_INTERFACE` 环境变量手动覆盖。
 - 如果 helper 已经在跑，启动流程会复用它，不再把这种情况当成 fatal error。
-  干净启动时，endpoint 探测会短暂等待 Virtualization 创建 `bridge*` /
-  `vmenet*` 接口。
+  `vphone-cli` 集成路径会在启动时替换掉已有 helper，让每次 boot 都能接管
+  自己的清理。干净启动时，endpoint 探测会短暂等待 Virtualization 创建
+  `bridge*` / `vmenet*` 接口。
 - 使用该参数时会打开一个 "TCP Workaround Diagnostics" 窗口。若联网仍失败，
   点 Copy 后把内容带回来；里面包含 helper 路径、cwd、bridge 候选、helper
   输出，以及 `scripts/vm_tproxy_start.sh status` 输出。
