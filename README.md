@@ -278,6 +278,9 @@ Notes:
 - The helper inherits the same auto-detection used by the older standalone
   scripts; on a non-standard host you can still override `LISTEN_ADDR` /
   `PF_INTERFACE` via env vars.
+- If a helper is already running, startup reuses it instead of treating that as
+  a fatal error. Endpoint detection waits briefly for Virtualization's
+  `bridge*` / `vmenet*` interface to appear during clean boots.
 - A "TCP Workaround Diagnostics" window opens when the flag is used. If the
   workaround does not connect, use its Copy button and include that text in the
   report; it contains the helper path, cwd, bridge candidate, helper output, and

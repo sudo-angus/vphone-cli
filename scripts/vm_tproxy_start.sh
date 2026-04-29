@@ -21,8 +21,15 @@ CONNECT_TIMEOUT="${CONNECT_TIMEOUT:-30}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 WATCH_PID="${WATCH_PID:-}"
 WATCH_INTERVAL="${WATCH_INTERVAL:-2}"
+ENDPOINT_TIMEOUT="${ENDPOINT_TIMEOUT:-60}"
+ENDPOINT_INTERVAL="${ENDPOINT_INTERVAL:-1}"
 proxy_pid=""
 watchdog_pid=""
+
+pid_exists() {
+    local pid="$1"
+    [[ -n "$pid" ]] && ps -p "$pid" -o pid= >/dev/null 2>&1
+}
 
 require_root() {
     if [[ "$(id -u)" -ne 0 ]]; then
@@ -52,8 +59,7 @@ detect_pf_interface() {
     )"
 
     if [[ -z "$detected" ]]; then
-        echo "[tproxy] failed to find an interface with address $LISTEN_ADDR; set PF_INTERFACE=..." >&2
-        exit 1
+        return 1
     fi
 
     echo "$detected"
@@ -72,8 +78,7 @@ detect_listen_addr_for_interface() {
     )"
 
     if [[ -z "$detected" ]]; then
-        echo "[tproxy] interface '$target_interface' has no IPv4 address; set LISTEN_ADDR=..." >&2
-        exit 1
+        return 1
     fi
 
     echo "$detected"
@@ -106,7 +111,7 @@ detect_vmnet_bridge_endpoint() {
     '
 }
 
-resolve_listen_endpoint() {
+resolve_listen_endpoint_once() {
     local resolved_interface="$PF_INTERFACE"
     local resolved_addr="$LISTEN_ADDR"
     local auto_endpoint=""
@@ -117,13 +122,13 @@ resolve_listen_endpoint() {
     fi
 
     if [[ -n "$resolved_addr" ]]; then
-        resolved_interface="$(detect_pf_interface)"
+        resolved_interface="$(detect_pf_interface)" || return 1
         echo "$resolved_interface|$resolved_addr"
         return
     fi
 
     if [[ -n "$resolved_interface" ]]; then
-        resolved_addr="$(detect_listen_addr_for_interface "$resolved_interface")"
+        resolved_addr="$(detect_listen_addr_for_interface "$resolved_interface")" || return 1
         echo "$resolved_interface|$resolved_addr"
         return
     fi
@@ -134,8 +139,27 @@ resolve_listen_endpoint() {
         return
     fi
 
-    echo "[tproxy] failed to auto-detect the Virtualization shared bridge; set LISTEN_ADDR=... and/or PF_INTERFACE=..." >&2
-    exit 1
+    return 1
+}
+
+resolve_listen_endpoint() {
+    local deadline=$((SECONDS + ENDPOINT_TIMEOUT))
+    local endpoint=""
+
+    while true; do
+        if endpoint="$(resolve_listen_endpoint_once)"; then
+            echo "$endpoint"
+            return
+        fi
+
+        if (( SECONDS >= deadline )); then
+            echo "[tproxy] failed to auto-detect the Virtualization shared bridge within ${ENDPOINT_TIMEOUT}s; set LISTEN_ADDR=... and/or PF_INTERFACE=..." >&2
+            exit 1
+        fi
+
+        echo "[tproxy] waiting for Virtualization shared bridge endpoint..." >&2
+        sleep "$ENDPOINT_INTERVAL"
+    done
 }
 
 load_anchor() {
@@ -156,7 +180,7 @@ kill_proxy() {
     if [[ -f "$PID_FILE" ]]; then
         local pid
         pid="$(<"$PID_FILE")"
-        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+        if pid_exists "$pid"; then
             kill "$pid" 2>/dev/null || true
             wait "$pid" 2>/dev/null || true
         fi
@@ -187,7 +211,7 @@ status() {
     local pid=""
     if [[ -f "$PID_FILE" ]]; then
         pid="$(<"$PID_FILE")"
-        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+        if pid_exists "$pid"; then
             running="yes"
         fi
     fi
@@ -203,9 +227,9 @@ start() {
     if [[ -f "$PID_FILE" ]]; then
         local existing_pid
         existing_pid="$(<"$PID_FILE")"
-        if [[ -n "$existing_pid" ]] && kill -0 "$existing_pid" 2>/dev/null; then
-            echo "[tproxy] already running (pid=$existing_pid)" >&2
-            exit 1
+        if pid_exists "$existing_pid"; then
+            echo "[tproxy] already running; reusing existing proxy (pid=$existing_pid)"
+            exit 0
         fi
         rm -f "$PID_FILE"
     fi

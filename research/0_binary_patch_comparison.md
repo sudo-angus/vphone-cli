@@ -335,6 +335,16 @@
   - a post-launch `scripts/vm_tproxy_start.sh status` probe
 - The diagnostics window has a Copy button so remote validation can return a
   concrete state dump instead of only "networking works / does not work".
+- Validation feedback showed a successful networking run where the integrated
+  launch saw an existing root-owned proxy pid. The old `status` path used
+  `kill -0`, so a non-root status probe could misreport an existing root process
+  as `proxy_running=no`.
+- `scripts/vm_tproxy_start.sh` now uses `ps -p` for pid existence checks, so
+  status probes work for root-owned proxy processes. `start` treats an existing
+  live proxy as reusable success instead of exiting with status 1.
+- Clean integrated starts can race Virtualization's bridge creation; endpoint
+  resolution now retries briefly before failing, while leaving `vm_tproxy.py`
+  and the pf/DIOCNATLOOK forwarding path unchanged.
 
 ## Automation Notes (2026-03-06)
 
