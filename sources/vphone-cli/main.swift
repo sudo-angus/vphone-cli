@@ -1,6 +1,13 @@
 import AppKit
 import ArgumentParser
+import Darwin
 import Foundation
+
+// Many code paths in vphone-cli (vsock byte pumps, host bridges, sub-process
+// stdio) write to sockets/pipes whose peers can disappear at any time. Default
+// SIGPIPE handling terminates the process with exit 141. Ignore it globally so
+// errno=EPIPE surfaces through normal error paths instead.
+signal(SIGPIPE, SIG_IGN)
 
 do {
     let command = try VPhoneCLI.parseAsRoot()

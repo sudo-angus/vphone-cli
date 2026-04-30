@@ -71,6 +71,17 @@ struct VPhoneBootCLI: ParsableCommand {
     )
     var tcpWorkaround: Bool = false
 
+    @Option(
+        name: .customLong("socks5-port"),
+        help: """
+        Expose the guest's network as a SOCKS5 proxy on 127.0.0.1:<port>. \
+        Use 0 (default) to disable. The host bridge is a transparent byte \
+        pump; SOCKS5 (incl. DNS) runs in the guest, so any active iOS VPN \
+        routes are picked up automatically. Unavailable with --dfu.
+        """
+    )
+    var socks5Port: Int = 0
+
     /// DFU mode runs headless (no GUI).
     var noGraphics: Bool {
         dfu
@@ -85,6 +96,17 @@ struct VPhoneBootCLI: ParsableCommand {
             throw ValidationError(
                 "`--tcp-workaround` is unavailable with `--dfu` because DFU mode has no guest network."
             )
+        }
+
+        if socks5Port != 0 {
+            if dfu {
+                throw ValidationError(
+                    "`--socks5-port` is unavailable with `--dfu` because DFU mode does not start vphoned."
+                )
+            }
+            if !(1 ... 65535).contains(socks5Port) {
+                throw ValidationError("`--socks5-port` must be 0 (disabled) or 1...65535")
+            }
         }
 
         if dfu, let packageURL = installPackageURL {

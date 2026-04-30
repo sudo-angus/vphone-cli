@@ -14,6 +14,7 @@ class VPhoneAppDelegate: NSObject, NSApplicationDelegate {
     private var locationProvider: VPhoneLocationProvider?
     private var hostControl: VPhoneHostControl?
     private var transparentProxy: VPhoneTransparentProxy?
+    private var socks5Bridge: VPhoneSocks5Bridge?
     private var sigintSource: DispatchSourceSignal?
     private var didAttemptAutoInstall = false
 
@@ -95,6 +96,11 @@ class VPhoneAppDelegate: NSObject, NSApplicationDelegate {
 
             if let device = vm.virtualMachine.socketDevices.first as? VZVirtioSocketDevice {
                 control.connect(device: device)
+                if cli.socks5Port > 0 {
+                    let bridge = VPhoneSocks5Bridge(listenPort: UInt16(cli.socks5Port))
+                    bridge.start(device: device)
+                    socks5Bridge = bridge
+                }
             }
         }
 
@@ -262,6 +268,7 @@ class VPhoneAppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_: Notification) {
         hostControl?.stop()
         transparentProxy?.stop()
+        socks5Bridge?.stop()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_: NSApplication) -> Bool {

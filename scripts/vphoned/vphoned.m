@@ -16,6 +16,7 @@
 #include <CommonCrypto/CommonDigest.h>
 #import <Foundation/Foundation.h>
 #include <mach-o/dyld.h>
+#include <signal.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -32,6 +33,7 @@
 #import "vphoned_notify.h"
 #import "vphoned_protocol.h"
 #import "vphoned_settings.h"
+#import "vphoned_socks5.h"
 #import "vphoned_url.h"
 
 #ifndef AF_VSOCK
@@ -426,6 +428,11 @@ int main(int argc, char *argv[]) {
     }
 #endif
 
+    // SOCKS5 byte pumps + control writes hit closed peers routinely; default
+    // SIGPIPE termination is wrong for a long-running daemon. Ignore so
+    // write()/send() return -1/EPIPE instead.
+    signal(SIGPIPE, SIG_IGN);
+
     if (!vp_hid_load())
       return 1;
     if (!vp_devmode_load())
@@ -434,6 +441,13 @@ int main(int argc, char *argv[]) {
 
     gClipboardAvailable = vp_clipboard_load();
     gAppsAvailable = vp_apps_load();
+
+    // SOCKS5-over-vsock listener: lets the host reach guest network (incl.
+    // active iOS VPN routes) as a regular SOCKS5 proxy. Independent of the
+    // control channel — failures here must not block the daemon.
+    if (!vp_socks5_start()) {
+      NSLog(@"vphoned: SOCKS5 listener disabled (init failed)");
+    }
 
     int sock = socket(AF_VSOCK, SOCK_STREAM, 0);
     if (sock < 0) {
