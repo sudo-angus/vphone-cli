@@ -39,7 +39,7 @@ public final class ManifestHashPatcher: Patcher {
             fileOffset: 0,
             originalBytes: Data(),
             patchedBytes: Data(),
-            description: "Updated the file hashes according to the actual files",
+            description: "Updated the file hashes according to the actual files"
         )]
         return patches
     }

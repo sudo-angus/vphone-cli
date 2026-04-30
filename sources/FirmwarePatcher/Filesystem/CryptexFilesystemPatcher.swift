@@ -75,7 +75,7 @@ public final class CryptexFilesystemPatcher: Patcher {
             fileOffset: 0,
             originalBytes: Data(),
             patchedBytes: Data(),
-            description: "Merge the cryptex filesystems inside the OS filesystem",
+            description: "Merge the cryptex filesystems inside the OS filesystem"
         )]
     }
     
