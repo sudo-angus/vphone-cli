@@ -320,6 +320,8 @@ __marimo__/
 /research/jb_asm_refs
 /references/
 scripts/vphoned/vphoned
+scripts/vphoned/vphone_shake_dylib_data.h
+scripts/vphone_shake_helper/vphone_shake.dylib
 /cfw_input/
 sources/vphone-cli/VPhoneBuildInfo.swift
 setup_logs/

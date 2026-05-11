@@ -315,6 +315,13 @@ class VPhoneControl {
         return resp["hash"] as? String ?? "unknown"
     }
 
+    func sendShake() async throws {
+        guard guestCaps.contains("shake") else {
+            throw ControlError.unsupportedCapability("shake")
+        }
+        _ = try await sendRequest(["t": "shake"])
+    }
+
     /// Cancel all currently pending request continuations.
     func cancelPendingRequests(reason: String = "cancelled by host") {
         failAllPending(with: .cancelled(reason))

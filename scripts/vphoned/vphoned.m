@@ -30,6 +30,7 @@
 #import "vphoned_install.h"
 #import "vphoned_keychain.h"
 #import "vphoned_location.h"
+#import "vphoned_motion.h"
 #import "vphoned_notify.h"
 #import "vphoned_protocol.h"
 #import "vphoned_settings.h"
@@ -197,6 +198,10 @@ static NSDictionary *handle_command(NSDictionary *msg) {
     return vp_make_response(@"pong", reqId);
   }
 
+  if ([type isEqualToString:@"shake"]) {
+    return vp_handle_motion_command(msg);
+  }
+
   if ([type isEqualToString:@"location"]) {
     double lat = [msg[@"lat"] doubleValue];
     double lon = [msg[@"lon"] doubleValue];
@@ -290,6 +295,8 @@ static BOOL handle_client(int fd) {
       [caps addObject:@"apps"];
     [caps addObject:@"url"];
     [caps addObject:@"settings"];
+    if (vp_motion_available())
+      [caps addObject:@"shake"];
 
     NSMutableDictionary *helloResp = [@{
       @"v" : @PROTOCOL_VERSION,
@@ -438,6 +445,8 @@ int main(int argc, char *argv[]) {
     if (!vp_devmode_load())
       NSLog(@"vphoned: XPC unavailable, devmode disabled");
     vp_location_load();
+    if (!vp_motion_load())
+      NSLog(@"vphoned: motion unavailable, shake disabled");
 
     gClipboardAvailable = vp_clipboard_load();
     gAppsAvailable = vp_apps_load();

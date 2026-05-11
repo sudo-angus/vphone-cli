@@ -37,6 +37,11 @@ extension VPhoneMenuController {
         connectGuestVersionItem = guestVersion
         menu.addItem(guestVersion)
 
+        let shake = makeItem("Shake", action: #selector(sendShake))
+        shake.isEnabled = false
+        connectShakeItem = shake
+        menu.addItem(shake)
+
         menu.addItem(NSMenuItem.separator())
 
         let clipGet = makeItem("Get Clipboard", action: #selector(getClipboard))
@@ -81,6 +86,7 @@ extension VPhoneMenuController {
         connectDevModeStatusItem?.isEnabled = available
         connectPingItem?.isEnabled = available
         connectGuestVersionItem?.isEnabled = available
+        connectShakeItem?.isEnabled = available && control.guestCaps.contains("shake")
     }
 
     @objc func openFiles() {
@@ -124,6 +130,16 @@ extension VPhoneMenuController {
                 showAlert(title: "Guest Version", message: "build: \(hash)", style: .informational)
             } catch {
                 showAlert(title: "Guest Version", message: "\(error)", style: .warning)
+            }
+        }
+    }
+
+    @objc func sendShake() {
+        Task {
+            do {
+                try await control.sendShake()
+            } catch {
+                showAlert(title: "Shake", message: "\(error)", style: .warning)
             }
         }
     }
