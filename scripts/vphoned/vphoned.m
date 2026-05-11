@@ -451,11 +451,15 @@ int main(int argc, char *argv[]) {
     gClipboardAvailable = vp_clipboard_load();
     gAppsAvailable = vp_apps_load();
 
-    // SOCKS5-over-vsock listener: lets the host reach guest network (incl.
-    // active iOS VPN routes) as a regular SOCKS5 proxy. Independent of the
-    // control channel — failures here must not block the daemon.
+    // SOCKS5-over-vsock listeners: TCP CONNECT (1340) + UDP relay (1341).
+    // Together they let the host reach guest network (incl. active iOS VPN
+    // routes) as a regular SOCKS5 proxy. Independent of the control channel
+    // — failures here must not block the daemon.
     if (!vp_socks5_start()) {
       NSLog(@"vphoned: SOCKS5 listener disabled (init failed)");
+    }
+    if (!vp_socks5_udp_start()) {
+      NSLog(@"vphoned: SOCKS5 UDP relay disabled (init failed)");
     }
 
     int sock = socket(AF_VSOCK, SOCK_STREAM, 0);
