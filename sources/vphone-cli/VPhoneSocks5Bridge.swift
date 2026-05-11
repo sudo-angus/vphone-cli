@@ -123,9 +123,19 @@ final class VPhoneSocks5Bridge {
         // Parse off the main actor — read/write blocking syscalls.
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let parsed = Self.readSocks5Request(clientFd: clientFd) else {
+                print("[socks5] handshake parse failed; closing")
                 Darwin.close(clientFd)
                 return
             }
+
+            let cmdName: String
+            switch parsed.cmd {
+            case 0x01: cmdName = "CONNECT"
+            case 0x02: cmdName = "BIND"
+            case 0x03: cmdName = "UDP_ASSOCIATE"
+            default: cmdName = "0x\(String(parsed.cmd, radix: 16))"
+            }
+            print("[socks5] CMD=\(cmdName) atyp=0x\(String(parsed.atyp, radix: 16))")
 
             switch parsed.cmd {
             case 0x01: // CONNECT
