@@ -274,7 +274,14 @@ final class VPhoneSocks5Bridge {
                     if reply[1] != 0x00 {
                         Darwin.close(clientFd); _ = conn; return
                     }
-                    Self.spliceBoth(a: clientFd, b: vsockFd) { _ = conn }
+                    // `vsockFd` is owned by `conn` — don't close it here.
+                    // Holding `conn` until splice is done lets VZ close it via
+                    // deinit. Closing it ourselves races fd reuse inside the VZ
+                    // helper and trips the virtio.vsock-device assertion.
+                    Self.spliceBoth(a: clientFd, b: vsockFd) {
+                        Darwin.close(clientFd)
+                        _ = conn
+                    }
                 }
             case let .failure(err):
                 print("[socks5] vsock connect failed: \(err)")
@@ -503,13 +510,17 @@ final class VPhoneSocks5Bridge {
         group.notify(queue: q) {
             Darwin.close(clientFd)
             Darwin.close(udpFd)
-            Darwin.close(vsockFd)
+            // `vsockFd` is owned by the VZVirtioSocketConnection captured in
+            // `holdConn`; releasing it via deinit is what closes the fd.
             holdConn()
         }
     }
 
     // MARK: - Byte splice (CONNECT)
 
+    /// Bidirectional byte pump. Caller owns fd lifecycle — `onDone` should
+    /// close any caller-owned fds and release any retained VZ connections;
+    /// `spliceBoth` only does `shutdown(SHUT_WR)` to wake the peer direction.
     nonisolated private static func spliceBoth(a: Int32, b: Int32, onDone: @escaping () -> Void) {
         let group = DispatchGroup()
         let q = DispatchQueue.global(qos: .utility)
@@ -526,11 +537,7 @@ final class VPhoneSocks5Bridge {
             _ = Darwin.shutdown(a, SHUT_WR)
             group.leave()
         }
-        group.notify(queue: q) {
-            Darwin.close(a)
-            Darwin.close(b)
-            onDone()
-        }
+        group.notify(queue: q, execute: onDone)
     }
 
     nonisolated private static func pump(from src: Int32, to dst: Int32) {
