@@ -218,11 +218,12 @@ class VPhoneVirtualMachine: NSObject, VZVirtualMachineDelegate {
             print("[vphone] PL011 serial port attached (interactive)")
         }
         
-        if let obj1 = Dynamic._VZMacVideoToolboxDeviceConfiguration().asObject,
-           let obj2 = Dynamic._VZMacNeuralEngineDeviceConfiguration().asObject {
-            Dynamic(config)._setAcceleratorDevices([obj1,obj2])
-            print("[vphone] Accelerator devices configured")
-        }
+        // VT/ANE paravirt 加速器先不接:guest 进程走
+        // AppleVideoToolboxParavirtualizationUserClient 时,我们的 kernel patch
+        // 会让 MACF 拒入,接着 host 的 avp.videotoolbox session 反复回
+        // VTParavirtualizationHostSessionDeliverMessageFromGuest=-19093,VZ 最终
+        // 以 VZErrorInternal "stopped unexpectedly" 把整个 VM 拆掉。等 guest
+        // MACF 路径修好再恢复;代价是 guest 走软解 VT/ANE。
 
         // Multi-touch (USB touch screen)
         if let obj = Dynamic._VZUSBTouchScreenConfiguration().asObject {
