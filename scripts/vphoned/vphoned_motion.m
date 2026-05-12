@@ -110,6 +110,9 @@ static void diag(const char *fmt, ...) {
 __attribute__((naked, noinline, used))
 static void shellcode_template(void) {
     asm volatile(
+        // PAC mnemonics aren't in baseline arm64; enable for this block only.
+        // On non-PAC CPUs the encoded bytes decode as NOP / plain BLR.
+        ".arch_extension pauth  \n"
         // === OUTER ENTRY (offset 0) ===
         // x0 = args pointer.
         "mov  x19, x0           \n"   // save args
