@@ -82,6 +82,22 @@ struct VPhoneBootCLI: ParsableCommand {
     )
     var socks5Port: Int = 0
 
+    @Option(
+        name: .customLong("usbmux-forward"),
+        help: """
+        Forward a local TCP port to a guest TCP port through native usbmux. \
+        Repeatable. Format: <local-port>:<guest-port>, e.g. 2222:22222 or 5910:5910. \
+        Unavailable with --dfu.
+        """
+    )
+    var usbmuxForwards: [VPhoneUSBMuxForwardSpec] = []
+
+    @Option(
+        name: .customLong("usbmux-udid"),
+        help: "Override the usbmux target UDID for integrated native port forwarding."
+    )
+    var usbmuxUDID: String?
+
     /// DFU mode runs headless (no GUI).
     var noGraphics: Bool {
         dfu
@@ -106,6 +122,20 @@ struct VPhoneBootCLI: ParsableCommand {
             }
             if !(1 ... 65535).contains(socks5Port) {
                 throw ValidationError("`--socks5-port` must be 0 (disabled) or 1...65535")
+            }
+        }
+
+        if !usbmuxForwards.isEmpty {
+            if dfu {
+                throw ValidationError(
+                    "`--usbmux-forward` is unavailable with `--dfu` because DFU mode has no usbmux TCP services."
+                )
+            }
+            var localPorts = Set<Int>()
+            for forward in usbmuxForwards {
+                guard localPorts.insert(forward.localPort).inserted else {
+                    throw ValidationError("duplicate `--usbmux-forward` local port: \(forward.localPort)")
+                }
             }
         }
 
@@ -156,6 +186,30 @@ struct VPhoneBootCLI: ParsableCommand {
     }
 
     mutating func run() throws {}
+}
+
+struct VPhoneUSBMuxForwardSpec: ExpressibleByArgument, CustomStringConvertible, Sendable {
+    let localPort: Int
+    let guestPort: Int
+
+    init?(argument: String) {
+        let normalized = argument.replacingOccurrences(of: "=", with: ":")
+        let parts = normalized.split(separator: ":", omittingEmptySubsequences: false)
+        guard parts.count == 2,
+              let local = Int(parts[0]),
+              let guest = Int(parts[1]),
+              (1 ... 65535).contains(local),
+              (1 ... 65535).contains(guest)
+        else {
+            return nil
+        }
+        localPort = local
+        guestPort = guest
+    }
+
+    var description: String {
+        "\(localPort):\(guestPort)"
+    }
 }
 
 struct PatchFirmwareCLI: ParsableCommand {

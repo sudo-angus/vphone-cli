@@ -297,11 +297,29 @@ Notes:
   debugging), `scripts/vm_tproxy_start.sh start|stop|status` still works as
   before.
 
-In a separate terminal, start usbmux forward tunnels:
+`make boot` can start native usbmux TCP forwarders without Python. Pass one or
+more `--usbmux-forward <local>:<guest>` entries through `EXTRA_ARGS`:
 
 ```bash
-python3 -m pymobiledevice3 usbmux forward 2222 22222    # SSH (dropbear)
-python3 -m pymobiledevice3 usbmux forward 2222 22       # SSH (JB: if you install openssh-server from Sileo)
+make boot EXTRA_ARGS="--usbmux-forward 2222:22222 --usbmux-forward 5910:5910"
+```
+
+This replaces separate `pymobiledevice3 usbmux forward` processes for those
+ports. Examples:
+
+```bash
+make boot EXTRA_ARGS="--usbmux-forward 2222:22222"  # SSH (dropbear)
+make boot EXTRA_ARGS="--usbmux-forward 2222:22"     # SSH (OpenSSH)
+make boot EXTRA_ARGS="--usbmux-forward 5910:5910"   # RPC
+```
+
+The target is matched by the VM's predicted UDID/ECID; `--usbmux-udid <UDID>`
+can override it for unusual setups. If no `--usbmux-forward` is passed, no
+native usbmux tunnel is started.
+
+Other optional tunnels can still be started separately if you prefer:
+
+```bash
 python3 -m pymobiledevice3 usbmux forward 5901 5901     # VNC
 python3 -m pymobiledevice3 usbmux forward 5910 5910     # RPC
 ```

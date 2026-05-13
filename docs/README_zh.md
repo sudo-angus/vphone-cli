@@ -251,11 +251,28 @@ anchor —— 不依赖 launchd，也不会留下残余规则。
 - 如果你想绕开 `vphone-cli` 单独调试 helper，仍然可以直接跑
   `scripts/vm_tproxy_start.sh start|stop|status`，行为没变。
 
-在另一个终端中启动 usbmux 转发隧道：
+`make boot` 可以通过原生 usbmux 启动 TCP 端口转发，不需要 Python。通过
+`EXTRA_ARGS` 传入一个或多个 `--usbmux-forward <local>:<guest>`：
 
 ```bash
-python3 -m pymobiledevice3 usbmux forward 2222 22222    # SSH（dropbear）
-python3 -m pymobiledevice3 usbmux forward 2222 22       # SSH（越狱版：在 Sileo 中安装 openssh-server 后）
+make boot EXTRA_ARGS="--usbmux-forward 2222:22222 --usbmux-forward 5910:5910"
+```
+
+这些端口不再需要单独运行 `pymobiledevice3 usbmux forward`。示例：
+
+```bash
+make boot EXTRA_ARGS="--usbmux-forward 2222:22222"  # SSH（dropbear）
+make boot EXTRA_ARGS="--usbmux-forward 2222:22"     # SSH（OpenSSH）
+make boot EXTRA_ARGS="--usbmux-forward 5910:5910"   # RPC
+```
+
+目标设备会按 VM 预测的 UDID/ECID 匹配；特殊环境下可以用
+`--usbmux-udid <UDID>` 覆盖。如果没有传入 `--usbmux-forward`，则不会启动
+原生 usbmux 隧道。
+
+其他可选隧道仍可按需在另一个终端中启动：
+
+```bash
 python3 -m pymobiledevice3 usbmux forward 5901 5901     # VNC
 python3 -m pymobiledevice3 usbmux forward 5910 5910     # RPC
 ```

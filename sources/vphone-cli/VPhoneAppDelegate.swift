@@ -15,6 +15,7 @@ class VPhoneAppDelegate: NSObject, NSApplicationDelegate {
     private var hostControl: VPhoneHostControl?
     private var transparentProxy: VPhoneTransparentProxy?
     private var socks5Bridge: VPhoneSocks5Bridge?
+    private var usbmuxForwarders: [VPhoneUSBMuxForwarder] = []
     private var sigintSource: DispatchSourceSignal?
     private var didAttemptAutoInstall = false
 
@@ -81,6 +82,10 @@ class VPhoneAppDelegate: NSObject, NSApplicationDelegate {
 
         if cli.tcpWorkaround {
             startTransparentProxy()
+        }
+
+        if !cli.usbmuxForwards.isEmpty {
+            startUSBMuxForwarders(vm: vm)
         }
 
         let control = VPhoneControl(variant: options.variant)
@@ -265,10 +270,25 @@ class VPhoneAppDelegate: NSObject, NSApplicationDelegate {
         transparentProxy = proxy
     }
 
+    @MainActor
+    private func startUSBMuxForwarders(vm: VPhoneVirtualMachine) {
+        let targetUDID = cli.usbmuxUDID?.isEmpty == false ? cli.usbmuxUDID : vm.deviceUDID
+        usbmuxForwarders = cli.usbmuxForwards.map { spec in
+            VPhoneUSBMuxForwarder(
+                listenPort: UInt16(spec.localPort),
+                targetPort: UInt16(spec.guestPort),
+                targetUDID: targetUDID,
+                targetECID: vm.ecidHex
+            )
+        }
+        usbmuxForwarders.forEach { $0.start() }
+    }
+
     func applicationWillTerminate(_: Notification) {
         hostControl?.stop()
         transparentProxy?.stop()
         socks5Bridge?.stop()
+        usbmuxForwarders.forEach { $0.stop() }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_: NSApplication) -> Bool {

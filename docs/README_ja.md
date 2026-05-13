@@ -222,11 +222,29 @@ shutdown -h now
 make boot
 ```
 
-別のターミナルで usbmux 転送トンネルを開始します：
+`make boot` は Python なしでネイティブ usbmux TCP フォワーダーを起動できます。
+`EXTRA_ARGS` 経由で 1 つ以上の `--usbmux-forward <local>:<guest>` を渡します：
 
 ```bash
-python3 -m pymobiledevice3 usbmux forward 2222 22222    # SSH（dropbear）
-python3 -m pymobiledevice3 usbmux forward 2222 22       # SSH（脱獄版：Sileo で openssh-server を入れた場合）
+make boot EXTRA_ARGS="--usbmux-forward 2222:22222 --usbmux-forward 5910:5910"
+```
+
+これらのポートでは、別途 `pymobiledevice3 usbmux forward` を起動する必要は
+ありません。例：
+
+```bash
+make boot EXTRA_ARGS="--usbmux-forward 2222:22222"  # SSH（dropbear）
+make boot EXTRA_ARGS="--usbmux-forward 2222:22"     # SSH（OpenSSH）
+make boot EXTRA_ARGS="--usbmux-forward 5910:5910"   # RPC
+```
+
+対象デバイスは VM の予測 UDID/ECID で照合されます。特殊な構成では
+`--usbmux-udid <UDID>` で上書きできます。`--usbmux-forward` を渡さない場合、
+ネイティブ usbmux トンネルは起動しません。
+
+その他の任意トンネルは、必要に応じて別のターミナルで開始できます：
+
+```bash
 python3 -m pymobiledevice3 usbmux forward 5901 5901     # VNC
 python3 -m pymobiledevice3 usbmux forward 5910 5910     # RPC
 ```

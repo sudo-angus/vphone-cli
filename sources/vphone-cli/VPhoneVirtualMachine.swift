@@ -6,8 +6,10 @@ import Virtualization
 @MainActor
 class VPhoneVirtualMachine: NSObject, VZVirtualMachineDelegate {
     let virtualMachine: VZVirtualMachine
-    /// ECID hex string resolved from machineIdentifier (e.g. "0x0012345678ABCDEF").
+    /// ECID hex string resolved from machineIdentifier (e.g. "0012345678ABCDEF").
     let ecidHex: String?
+    /// Predicted usbmux serial/UDID for this VM (e.g. "0000FE01-0012345678ABCDEF").
+    let deviceUDID: String?
     /// Read handle for VM serial output.
     private var serialOutputReadHandle: FileHandle?
     /// Synthetic battery source for runtime charge/connectivity updates.
@@ -108,6 +110,7 @@ class VPhoneVirtualMachine: NSObject, VZVirtualMachineDelegate {
 
         if let identity = Self.resolveDeviceIdentity(machineIdentifier: machineIdentifier) {
             ecidHex = identity.ecidHex
+            deviceUDID = identity.udid
             print("[vphone] ECID: \(ecidHex!)")
             print("[vphone] Predicted UDID: \(identity.udid)")
             let outputURL = options.configURL.deletingLastPathComponent().appendingPathComponent(
@@ -121,6 +124,7 @@ class VPhoneVirtualMachine: NSObject, VZVirtualMachineDelegate {
             }
         } else {
             ecidHex = nil
+            deviceUDID = nil
             print("[vphone] Warning: failed to resolve ECID from machineIdentifier")
         }
 
