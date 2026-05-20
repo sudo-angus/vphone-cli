@@ -20,9 +20,12 @@
 #include <mach-o/dyld.h>
 #include <net/if.h>
 #include <netinet/in.h>
+#include <pthread.h>
 #include <signal.h>
+#include <stdarg.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 #import "vphoned_accessibility.h"
@@ -59,6 +62,9 @@ static BOOL gAppsAvailable = NO;
 #define CACHE_PATH "/var/root/Library/Caches/vphoned"
 #define CACHE_DIR "/var/root/Library/Caches"
 
+#define BOOT_LOG_PATH "/var/root/Library/Caches/vphoned-boot.log"
+#define BOOT_LOG_MAX_BYTES (1 * 1024 * 1024)
+
 struct sockaddr_vm {
   __uint8_t svm_len;
   sa_family_t svm_family;
@@ -66,6 +72,40 @@ struct sockaddr_vm {
   __uint32_t svm_port;
   __uint32_t svm_cid;
 };
+
+// MARK: - Boot log
+//
+// Granular trace of daemon startup + handshake, written to a plain file so it
+// survives across boots and is readable without `log show`. Use when host sees
+// `handshake timed out after 8s` and you need to know which init step the
+// daemon was stuck on. Path: BOOT_LOG_PATH. Rotated to `.old` at >1MB.
+
+static pthread_mutex_t gBootLogMutex = PTHREAD_MUTEX_INITIALIZER;
+
+__attribute__((format(printf, 1, 2))) static void boot_log(const char *fmt,
+                                                           ...) {
+  pthread_mutex_lock(&gBootLogMutex);
+  FILE *f = fopen(BOOT_LOG_PATH, "a");
+  if (f) {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    fprintf(f, "%ld.%06d pid=%d ", (long)tv.tv_sec, (int)tv.tv_usec, getpid());
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(f, fmt, ap);
+    va_end(ap);
+    fputc('\n', f);
+    fclose(f);
+  }
+  pthread_mutex_unlock(&gBootLogMutex);
+}
+
+static void boot_log_rotate_if_needed(void) {
+  struct stat st;
+  if (stat(BOOT_LOG_PATH, &st) == 0 && st.st_size > BOOT_LOG_MAX_BYTES) {
+    rename(BOOT_LOG_PATH, BOOT_LOG_PATH ".old");
+  }
+}
 
 // MARK: - Self-hash
 
@@ -282,16 +322,21 @@ static NSDictionary *handle_command(NSDictionary *msg) {
 static BOOL handle_client(int fd) {
   BOOL should_restart = NO;
   @autoreleasepool {
+    boot_log("handle_client: enter fd=%d, reading hello", fd);
     NSDictionary *hello = vp_read_message(fd);
     if (!hello) {
+      boot_log("handle_client: hello read FAILED (closed/short)");
       close(fd);
       return NO;
     }
+    boot_log("handle_client: hello received");
 
     NSInteger version = [hello[@"v"] integerValue];
     NSString *type = hello[@"t"];
 
     if (![type isEqualToString:@"hello"]) {
+      boot_log("handle_client: expected hello, got %s",
+               type.UTF8String ?: "(null)");
       NSLog(@"vphoned: expected hello, got %@", type);
       close(fd);
       return NO;
@@ -314,8 +359,11 @@ static BOOL handle_client(int fd) {
     NSString *hostHash = hello[@"bin_hash"];
     BOOL needUpdate = NO;
     if (hostHash.length > 0) {
+      boot_log("handle_client: hashing self for update check");
       const char *selfPath = self_executable_path();
       NSString *selfHash = selfPath ? sha256_of_file(selfPath) : nil;
+      boot_log("handle_client: self-hash done (selfHash=%s)",
+               selfHash.UTF8String ?: "(nil)");
       if (selfHash && ![selfHash isEqualToString:hostHash]) {
         NSLog(@"vphoned: hash mismatch (self=%@ host=%@)", selfHash, hostHash);
         needUpdate = YES;
@@ -346,16 +394,22 @@ static BOOL handle_client(int fd) {
       @"name" : @"vphoned",
       @"caps" : caps,
     } mutableCopy];
+    boot_log("handle_client: querying primary_ipv4_address");
     NSString *ip = primary_ipv4_address();
+    boot_log("handle_client: ip=%s", ip.UTF8String ?: "(nil)");
     if (ip)
       helloResp[@"ip"] = ip;
     if (needUpdate)
       helloResp[@"need_update"] = @YES;
 
+    boot_log("handle_client: writing hello response (caps=%lu)",
+             (unsigned long)caps.count);
     if (!vp_write_message(fd, helloResp)) {
+      boot_log("handle_client: hello write FAILED");
       close(fd);
       return NO;
     }
+    boot_log("handle_client: hello response sent OK");
     NSLog(@"vphoned: client connected (v%d)%s", PROTOCOL_VERSION,
           needUpdate ? " [update pending]" : "");
 
@@ -464,16 +518,20 @@ static BOOL handle_client(int fd) {
 
 int main(int argc, char *argv[]) {
   @autoreleasepool {
+    boot_log_rotate_if_needed();
     // Bootstrap: if running from install path and a cached update exists, exec
     // it
     const char *selfPath = self_executable_path();
+    boot_log("main: enter selfPath=%s", selfPath ?: "?");
     NSLog(@"vphoned: starting (pid=%d, path=%s)", getpid(), selfPath ?: "?");
 
 #if !LESS
     if (selfPath && strcmp(selfPath, INSTALL_PATH) == 0 &&
         access(CACHE_PATH, X_OK) == 0) {
+      boot_log("main: exec'ing cache %s", CACHE_PATH);
       NSLog(@"vphoned: found cached binary at %s, exec'ing", CACHE_PATH);
       execv(CACHE_PATH, argv);
+      boot_log("main: execv failed errno=%d (%s)", errno, strerror(errno));
       NSLog(@"vphoned: execv failed: %s — continuing with installed binary",
             strerror(errno));
       unlink(CACHE_PATH);
@@ -485,30 +543,42 @@ int main(int argc, char *argv[]) {
     // write()/send() return -1/EPIPE instead.
     signal(SIGPIPE, SIG_IGN);
 
-    if (!vp_hid_load())
+    boot_log("init: vp_hid_load");
+    if (!vp_hid_load()) {
+      boot_log("init: vp_hid_load FAILED, exiting");
       return 1;
+    }
+    boot_log("init: vp_devmode_load");
     if (!vp_devmode_load())
       NSLog(@"vphoned: XPC unavailable, devmode disabled");
+    boot_log("init: vp_location_load");
     vp_location_load();
+    boot_log("init: vp_motion_load");
     if (!vp_motion_load())
       NSLog(@"vphoned: motion unavailable, shake disabled");
 
+    boot_log("init: vp_clipboard_load");
     gClipboardAvailable = vp_clipboard_load();
+    boot_log("init: vp_apps_load");
     gAppsAvailable = vp_apps_load();
 
     // SOCKS5-over-vsock listeners: TCP CONNECT (1340) + UDP relay (1341).
     // Together they let the host reach guest network (incl. active iOS VPN
     // routes) as a regular SOCKS5 proxy. Independent of the control channel
     // — failures here must not block the daemon.
+    boot_log("init: vp_socks5_start");
     if (!vp_socks5_start()) {
       NSLog(@"vphoned: SOCKS5 listener disabled (init failed)");
     }
+    boot_log("init: vp_socks5_udp_start");
     if (!vp_socks5_udp_start()) {
       NSLog(@"vphoned: SOCKS5 UDP relay disabled (init failed)");
     }
 
+    boot_log("vsock: socket()");
     int sock = socket(AF_VSOCK, SOCK_STREAM, 0);
     if (sock < 0) {
+      boot_log("vsock: socket FAILED errno=%d", errno);
       perror("vphoned: socket(AF_VSOCK)");
       return 1;
     }
@@ -523,27 +593,36 @@ int main(int argc, char *argv[]) {
         .svm_cid = VMADDR_CID_ANY,
     };
 
+    boot_log("vsock: bind(port=%d)", VPHONED_PORT);
     if (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+      boot_log("vsock: bind FAILED errno=%d", errno);
       perror("vphoned: bind");
       close(sock);
       return 1;
     }
+    boot_log("vsock: listen()");
     if (listen(sock, 2) < 0) {
+      boot_log("vsock: listen FAILED errno=%d", errno);
       perror("vphoned: listen");
       close(sock);
       return 1;
     }
 
+    boot_log("vsock: ready, entering accept loop");
     NSLog(@"vphoned: listening on vsock port %d", VPHONED_PORT);
 
     for (;;) {
+      boot_log("accept: waiting");
       int client = accept(sock, NULL, NULL);
       if (client < 0) {
+        boot_log("accept: FAILED errno=%d", errno);
         perror("vphoned: accept");
         sleep(1);
         continue;
       }
+      boot_log("accept: got client fd=%d", client);
       if (handle_client(client)) {
+        boot_log("accept: handler requested restart");
         NSLog(@"vphoned: exiting for update restart");
         close(sock);
         return 0;
