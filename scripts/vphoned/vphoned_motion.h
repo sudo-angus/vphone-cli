@@ -1,17 +1,19 @@
 /*
  * vphoned_motion — fire UIEventSubtypeMotionShake in a target app.
  *
- * Implemented via Mach injection of vphone_shake_helper.dylib (embedded
- * in vphoned at build time, deployed into the target app's own data
- * container at request time to satisfy the sandbox read policy). The
- * helper installs a SIGUSR2 handler that fires the shake event; vphoned
- * triggers it with kill().
+ * Implemented by Mach-injecting pure shellcode (no helper dylib): a raw
+ * Mach thread bootstraps a pthread, which dispatch_async_f's onto the main
+ * thread and delivers motionBegan:/motionEnded: to the key window's first
+ * responder via objc_msgSend. Loading a foreign-team dylib via dlopen()
+ * would be killed by AMFI library validation in any app that enforces
+ * CS_REQUIRE_LV | CS_KILL; executing injected code pages is not, so the
+ * shellcode path works on every firmware variant (not just Jailbreak).
+ * See research/shake_inject_killed_by_library_validation.md.
  *
  * Constraints:
  *   - Target must be a dev-signed app (get-task-allow=true). System apps
  *     are rejected by AMFI at task_for_pid time.
- *   - First request for a pid does the full inject; subsequent ones are
- *     just SIGUSR2.
+ *   - Each request re-injects; there is no resident per-pid state.
  */
 
 #pragma once
