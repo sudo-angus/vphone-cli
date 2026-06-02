@@ -10,7 +10,16 @@
 #include <dlfcn.h>
 #include <objc/message.h>
 #include <signal.h>
+#include <string.h>
 #include <unistd.h>
+
+// libproc prototypes — headers aren't exported in the iOS SDK (see
+// vphoned_motion.m, which relies on the same calls for task_for_pid targeting).
+#define PROC_PIDPATHINFO_MAXSIZE (4 * 1024)
+#define PROC_ALL_PIDS 1
+extern int proc_pidpath(int pid, void *buffer, uint32_t buffersize);
+extern int proc_listpids(uint32_t type, uint32_t typeinfo, void *buffer,
+                         int buffersize);
 
 // MARK: - Private API Declarations
 
@@ -82,35 +91,139 @@ static NSString *state_for_pid(pid_t pid) {
 
 // MARK: - Terminate Helper
 
+// Poll pidForApplication: until the app is gone or we hit total_ms. Returns
+// YES if no FrontBoard-tracked process remains for bundleID.
+static BOOL vp_wait_app_gone(NSString *bundleID, int total_ms) {
+  const int step_ms = 100;
+  for (int waited = 0; waited < total_ms; waited += step_ms) {
+    if (pid_for_app(bundleID) <= 0)
+      return YES;
+    usleep((useconds_t)step_ms * 1000);
+  }
+  return pid_for_app(bundleID) <= 0;
+}
+
+// Resolve the bundle container directory (.../Bundle/Application/<UUID>) for a
+// bundle id via LaunchServices. Returns nil if the app has no LS record.
+static NSString *vp_bundle_container_dir(NSString *bundleID) {
+  if (!bundleID.length)
+    return nil;
+  LSApplicationWorkspace *ws = [LSApplicationWorkspace defaultWorkspace];
+  for (LSApplicationProxy *proxy in [ws allInstalledApplications]) {
+    if ([proxy.bundleIdentifier isEqualToString:bundleID]) {
+      NSString *appPath = proxy.bundleURL.path; // .../<UUID>/Foo.app
+      return appPath.length ? appPath.stringByDeletingLastPathComponent : nil;
+    }
+  }
+  return nil;
+}
+
+// Scan the process table for processes whose executable belongs to the bundle
+// container at containerPath, matched on the unique <UUID> path component. That
+// makes the match immune to /var vs /private/var and to the bundle having been
+// deleted out from under a live process. SIGKILLs them when doKill is YES.
+// Returns the number of matching live processes found this pass.
+//
+// pidForApplication: only knows about processes FrontBoard still tracks. Once a
+// reinstall has pulled the bundle/registration out from under a live process,
+// FrontBoard loses the pid<->bundle binding and reports pid 0 even though the
+// process is still running — an "orphan" that neither pidForApplication: nor the
+// iOS app switcher can target. Sweeping by executable path reaps those too.
+static int vp_scan_bundle_processes(NSString *containerPath, BOOL doKill) {
+  NSString *uuid = containerPath.lastPathComponent;
+  if (uuid.length < 16)
+    return 0; // not a real per-app container UUID; refuse to match broadly
+  NSString *needleStr = [NSString stringWithFormat:@"/%@/", uuid];
+  const char *needle = needleStr.fileSystemRepresentation;
+  if (!needle)
+    return 0;
+
+  int npids_byte = proc_listpids(PROC_ALL_PIDS, 0, NULL, 0);
+  if (npids_byte <= 0)
+    return 0;
+  int cap = npids_byte / (int)sizeof(pid_t) + 16;
+  pid_t *pids = calloc((size_t)cap, sizeof(pid_t));
+  if (!pids)
+    return 0;
+  int got_byte = proc_listpids(PROC_ALL_PIDS, 0, pids, cap * (int)sizeof(pid_t));
+  int npids = got_byte / (int)sizeof(pid_t);
+
+  int matched = 0;
+  char path[PROC_PIDPATHINFO_MAXSIZE] = {0};
+  for (int i = 0; i < npids; i++) {
+    pid_t pid = pids[i];
+    if (pid <= 1)
+      continue;
+    if (proc_pidpath(pid, path, sizeof(path)) <= 0)
+      continue;
+    if (strstr(path, needle) == NULL)
+      continue;
+    matched++;
+    if (doKill) {
+      NSLog(@"vphoned: SIGKILL bundle process pid=%d path=%s", pid, path);
+      kill(pid, SIGKILL);
+    }
+  }
+  free(pids);
+  return matched;
+}
+
+void vp_sigkill_processes_under_path(NSString *containerPath) {
+  if (containerPath.length == 0)
+    return;
+  for (int i = 0; i < 30; i++) {
+    if (vp_scan_bundle_processes(containerPath, YES) == 0)
+      break;
+    usleep(100 * 1000);
+  }
+}
+
 BOOL vp_terminate_app(NSString *bundleID) {
   if (!bundleID.length || !gAppsLoaded)
     return YES;
 
-  pid_t pid = pid_for_app(bundleID);
-  if (pid <= 0)
-    return YES;
+  // Resolve the bundle container up front, while the LS record is still intact,
+  // so we can also reap instances FrontBoard no longer tracks ("orphans").
+  NSString *containerDir = vp_bundle_container_dir(bundleID);
 
-  if (gFBSSystemServiceClass) {
-    id service = ((id (*)(Class, SEL))objc_msgSend)(
-        gFBSSystemServiceClass, sel_registerName("sharedService"));
-    if (service) {
-      ((void (*)(id, SEL, id, int, BOOL, id))objc_msgSend)(
-          service,
-          sel_registerName(
-              "terminateApplication:forReason:andReport:withDescription:"),
-          bundleID, 5, NO, @"vphoned reinstall");
-      usleep(500000);
+  // 1. FrontBoard-tracked instance: ask for graceful termination, then escalate.
+  pid_t pid = pid_for_app(bundleID);
+  if (pid > 0) {
+    if (gFBSSystemServiceClass) {
+      id service = ((id (*)(Class, SEL))objc_msgSend)(
+          gFBSSystemServiceClass, sel_registerName("sharedService"));
+      if (service) {
+        ((void (*)(id, SEL, id, int, BOOL, id))objc_msgSend)(
+            service,
+            sel_registerName(
+                "terminateApplication:forReason:andReport:withDescription:"),
+            bundleID, 5, NO, @"vphoned terminate");
+      }
+    }
+    if (!vp_wait_app_gone(bundleID, 3000)) {
+      // SIGTERM is routinely ignored by an app's runloop; only SIGKILL from root
+      // is guaranteed. Loop and re-fetch the pid in case FrontBoard re-reports
+      // it briefly during teardown.
+      for (int i = 0; i < 30; i++) {
+        pid = pid_for_app(bundleID);
+        if (pid <= 0)
+          break;
+        kill(pid, SIGKILL);
+        usleep(100 * 1000);
+      }
     }
   }
 
-  pid = pid_for_app(bundleID);
-  if (pid > 0) {
-    kill(pid, SIGTERM);
-    usleep(300000);
-    pid = pid_for_app(bundleID);
-  }
+  // 2. Reap any process still executing out of the bundle container, including
+  //    orphans that pidForApplication: can no longer see.
+  if (containerDir.length)
+    vp_sigkill_processes_under_path(containerDir);
 
-  return pid <= 0;
+  // 3. Verdict: nothing FrontBoard-tracked AND nothing left under the bundle.
+  BOOL fbAlive = pid_for_app(bundleID) > 0;
+  BOOL pathAlive =
+      containerDir.length > 0 && vp_scan_bundle_processes(containerDir, NO) > 0;
+  return !fbAlive && !pathAlive;
 }
 
 // MARK: - Command Handler

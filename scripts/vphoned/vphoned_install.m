@@ -700,7 +700,15 @@ static int vp_install_app_from_package(
             return 171;
         }
         if (appBundleURL.path.length > 0) {
+            // Kill every instance before pulling the bundle/LaunchServices record
+            // out from under it. Deleting or unregistering a live app orphans the
+            // process: FrontBoard loses the pid<->bundle binding, so afterwards
+            // neither pidForApplication: nor the app switcher can target it, and
+            // it survives until the guest reboots. vp_terminate_app already sweeps
+            // by container UUID; pass the exact MCM container path too in case the
+            // LS record can't be resolved here.
             vp_terminate_app(appId);
+            vp_sigkill_processes_under_path(bundleContainerURL.path);
             vp_register_path(appBundleURL.path, YES, NO);
             [[NSFileManager defaultManager] removeItemAtURL:appBundleURL error:nil];
         }
