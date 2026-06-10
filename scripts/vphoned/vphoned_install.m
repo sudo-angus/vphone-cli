@@ -8,7 +8,10 @@
 #include <fcntl.h>
 #include <mach-o/fat.h>
 #include <mach-o/loader.h>
+#include <objc/message.h>
+#include <signal.h>
 #include <spawn.h>
+#include <sqlite3.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -34,11 +37,13 @@ extern CFStringRef kSecCodeInfoEntitlementsDict;
 + (instancetype)applicationProxyForIdentifier:(NSString *)identifier;
 @property (nonatomic, readonly) NSString *bundleIdentifier;
 @property (nonatomic, readonly) NSURL *bundleURL;
+@property (nonatomic, readonly) NSURL *dataContainerURL;
 @property (getter=isInstalled, nonatomic, readonly) BOOL installed;
 @end
 
 @interface LSApplicationWorkspace : NSObject
 + (instancetype)defaultWorkspace;
+- (NSArray *)allInstalledApplications;
 - (BOOL)registerApplicationDictionary:(NSDictionary *)dict;
 - (BOOL)unregisterApplication:(id)arg1;
 @end
@@ -51,6 +56,12 @@ extern CFStringRef kSecCodeInfoEntitlementsDict;
 @interface MCMContainer : NSObject
 + (id)containerWithIdentifier:(id)arg1 createIfNecessary:(BOOL)arg2 existed:(BOOL *)arg3 error:(id *)arg4;
 @property (nonatomic, readonly) NSURL *url;
+@end
+
+@interface MCMContainerManager : NSObject
++ (instancetype)defaultManager;
+- (id)containerWithContentClass:(NSInteger)contentClass identifier:(id)identifier error:(id *)error;
+- (id)deleteContainers:(NSArray *)containers withCompletion:(id)completion;
 @end
 
 static NSString *const VPManagedMarker = @"_VPhone";
@@ -771,6 +782,380 @@ BOOL vp_custom_installer_available(void) {
         && NSClassFromString(@"LSApplicationWorkspace") != Nil;
 }
 
+static BOOL vp_is_safe_container_path(NSString *path, NSString *component) {
+    if (path.length == 0) return NO;
+    NSString *standardized = path.stringByResolvingSymlinksInPath.stringByStandardizingPath;
+    if (![standardized containsString:component]) return NO;
+    return standardized.lastPathComponent.length >= 16;
+}
+
+static BOOL vp_remove_item_if_present(NSString *path, NSString **detailOutput) {
+    if (path.length == 0 || ![[NSFileManager defaultManager] fileExistsAtPath:path]) {
+        return YES;
+    }
+    NSError *error = nil;
+    if ([[NSFileManager defaultManager] removeItemAtPath:path error:&error]) {
+        return YES;
+    }
+    if (detailOutput) {
+        *detailOutput = error.localizedDescription ?: [NSString stringWithFormat:@"failed to remove %@", path];
+    }
+    return NO;
+}
+
+static BOOL vp_launchservices_has_bundle_id(NSString *bundleID) {
+    if (bundleID.length == 0) return NO;
+
+    LSApplicationWorkspace *workspace = [LSApplicationWorkspace defaultWorkspace];
+    if ([workspace respondsToSelector:@selector(allInstalledApplications)]) {
+        for (LSApplicationProxy *proxy in [workspace allInstalledApplications]) {
+            if ([proxy.bundleIdentifier isEqualToString:bundleID]) {
+                NSString *bundlePath = proxy.bundleURL.path;
+                return bundlePath.length > 0 && [[NSFileManager defaultManager] fileExistsAtPath:bundlePath];
+            }
+        }
+        return NO;
+    }
+
+    LSApplicationProxy *app = [LSApplicationProxy applicationProxyForIdentifier:bundleID];
+    NSString *bundlePath = app.bundleURL.path;
+    return bundlePath.length > 0 && [[NSFileManager defaultManager] fileExistsAtPath:bundlePath];
+}
+
+static BOOL vp_wait_for_launchservices_removal(NSString *bundleID) {
+    for (int i = 0; i < 30; i++) {
+        if (!vp_launchservices_has_bundle_id(bundleID)) {
+            return YES;
+        }
+        usleep(100 * 1000);
+    }
+    return !vp_launchservices_has_bundle_id(bundleID);
+}
+
+static BOOL vp_sqlite_exec_bundle_statement(sqlite3 *db, const char *sql, NSString *bundleID, NSString **detailOutput) {
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        if (detailOutput) *detailOutput = [NSString stringWithUTF8String:sqlite3_errmsg(db)];
+        return NO;
+    }
+
+    sqlite3_bind_text(stmt, 1, bundleID.UTF8String, -1, SQLITE_TRANSIENT);
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE) {
+        if (detailOutput) *detailOutput = [NSString stringWithUTF8String:sqlite3_errmsg(db)];
+        return NO;
+    }
+    return YES;
+}
+
+static BOOL vp_sqlite_exec_literal(sqlite3 *db, const char *sql, NSString **detailOutput) {
+    char *error = NULL;
+    int rc = sqlite3_exec(db, sql, NULL, NULL, &error);
+    if (rc != SQLITE_OK) {
+        if (detailOutput) {
+            *detailOutput = error ? [NSString stringWithUTF8String:error] : [NSString stringWithUTF8String:sqlite3_errmsg(db)];
+        }
+        if (error) sqlite3_free(error);
+        return NO;
+    }
+    return YES;
+}
+
+static BOOL vp_sqlite_exec_bundle_transaction(NSString *dbPath, NSArray<NSString *> *statements, NSString *bundleID, NSString **detailOutput) {
+    if (![[NSFileManager defaultManager] fileExistsAtPath:dbPath]) {
+        return YES;
+    }
+
+    sqlite3 *db = NULL;
+    int rc = sqlite3_open_v2(dbPath.fileSystemRepresentation, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, NULL);
+    if (rc != SQLITE_OK) {
+        if (detailOutput) {
+            const char *msg = db ? sqlite3_errmsg(db) : "sqlite open failed";
+            *detailOutput = [NSString stringWithFormat:@"%@: %s", dbPath.lastPathComponent, msg];
+        }
+        if (db) sqlite3_close(db);
+        return NO;
+    }
+
+    sqlite3_busy_timeout(db, 1000);
+    BOOL ok = vp_sqlite_exec_literal(db, "BEGIN IMMEDIATE", detailOutput);
+    for (NSString *statement in statements) {
+        if (!ok) break;
+        ok = vp_sqlite_exec_bundle_statement(db, statement.UTF8String, bundleID, detailOutput);
+    }
+    ok = ok
+        ? vp_sqlite_exec_literal(db, "COMMIT", detailOutput)
+        : (vp_sqlite_exec_literal(db, "ROLLBACK", NULL), NO);
+    sqlite3_wal_checkpoint_v2(db, NULL, SQLITE_CHECKPOINT_PASSIVE, NULL, NULL);
+    sqlite3_close(db);
+
+    if (!ok && detailOutput && (*detailOutput).length > 0) {
+        *detailOutput = [NSString stringWithFormat:@"%@: %@", dbPath.lastPathComponent, *detailOutput];
+    }
+    return ok;
+}
+
+static BOOL vp_remove_frontboard_state(NSString *bundleID, NSString **detailOutput) {
+    return vp_sqlite_exec_bundle_transaction(
+        @"/private/var/mobile/Library/FrontBoard/applicationState.db",
+        @[
+            @"DELETE FROM kvs WHERE application_identifier IN (SELECT id FROM application_identifier_tab WHERE application_identifier = ?)",
+            @"DELETE FROM application_identifier_tab WHERE application_identifier = ?",
+        ],
+        bundleID,
+        detailOutput
+    );
+}
+
+static BOOL vp_destroy_mobile_containers(NSString *bundleID, NSString **detailOutput) {
+    Class managerClass = NSClassFromString(@"MCMContainerManager");
+    if (!managerClass) {
+        if (detailOutput) *detailOutput = @"MCMContainerManager unavailable";
+        return NO;
+    }
+
+    MCMContainerManager *manager = [managerClass defaultManager];
+    if (!manager) {
+        if (detailOutput) *detailOutput = @"MCMContainerManager defaultManager unavailable";
+        return NO;
+    }
+
+    NSMutableArray *containers = [NSMutableArray array];
+    for (NSNumber *contentClass in @[@2, @1]) {
+        NSError *error = nil;
+        id container = [manager
+            containerWithContentClass:contentClass.integerValue
+                           identifier:bundleID
+                                error:&error];
+        if (container) {
+            [containers addObject:container];
+        } else if (error) {
+            NSLog(@"vphoned: MCM lookup failed for %@ class %@: %@", bundleID, contentClass, error);
+        }
+    }
+
+    if (containers.count == 0) {
+        return YES;
+    }
+
+    @try {
+        [manager deleteContainers:containers withCompletion:nil];
+    } @catch (NSException *exception) {
+        if (detailOutput) {
+            *detailOutput = [NSString stringWithFormat:@"MCM deleteContainers threw: %@", exception];
+        }
+        return NO;
+    }
+    return YES;
+}
+
+static void vp_sync_launchservices(void) {
+    LSApplicationWorkspace *workspace = [LSApplicationWorkspace defaultWorkspace];
+    SEL syncSelector = sel_registerName("_LSPrivateSyncWithMobileInstallation");
+    if ([workspace respondsToSelector:syncSelector]) {
+        ((void (*)(id, SEL))objc_msgSend)(workspace, syncSelector);
+    }
+}
+
+static BOOL vp_invoke_bool_unregistration(SEL selector, NSString *bundleID, BOOL hasPrecondition, NSInteger operation) {
+    LSApplicationWorkspace *workspace = [LSApplicationWorkspace defaultWorkspace];
+    if (![workspace respondsToSelector:selector]) return NO;
+
+    NSError *error = nil;
+    NSUUID *operationUUID = [NSUUID UUID];
+    id saveObserver = nil;
+    BOOL result = NO;
+    @try {
+        if (hasPrecondition) {
+            typedef BOOL (*UnregisterWithPreconditionFn)(id, SEL, id, id, unsigned int, id, id, id, NSError **);
+            result = ((UnregisterWithPreconditionFn)objc_msgSend)(
+                workspace,
+                selector,
+                bundleID,
+                operationUUID,
+                (unsigned int)operation,
+                nil,
+                nil,
+                saveObserver,
+                &error
+            );
+        } else {
+            typedef BOOL (*UnregisterFn)(id, SEL, id, id, unsigned int, id, id, NSError **);
+            result = ((UnregisterFn)objc_msgSend)(
+                workspace,
+                selector,
+                bundleID,
+                operationUUID,
+                (unsigned int)operation,
+                nil,
+                saveObserver,
+                &error
+            );
+        }
+    } @catch (NSException *exception) {
+        NSLog(@"vphoned: %@ threw for %@: %@", NSStringFromSelector(selector), bundleID, exception);
+        return NO;
+    }
+    if (error) {
+        NSLog(@"vphoned: %@ error for %@: %@", NSStringFromSelector(selector), bundleID, error);
+    }
+    return result || !vp_launchservices_has_bundle_id(bundleID);
+}
+
+static BOOL vp_helper_unregister_launchservices(NSString *bundleID, NSString *appBundlePath) {
+    vp_load_private_frameworks();
+
+    SEL unregisterWithPrecondition = sel_registerName(
+        "unregisterContainerizedApplicationWithBundleIdentifier:operationUUID:unregistrationOperation:precondition:requestContext:saveObserver:unregistrationError:"
+    );
+    SEL unregisterWithoutPrecondition = sel_registerName(
+        "unregisterContainerizedApplicationWithBundleIdentifier:operationUUID:unregistrationOperation:requestContext:saveObserver:unregistrationError:"
+    );
+
+    for (NSInteger operation = 0; operation <= 1; operation++) {
+        if (vp_invoke_bool_unregistration(unregisterWithPrecondition, bundleID, YES, operation)) return YES;
+        if (vp_invoke_bool_unregistration(unregisterWithoutPrecondition, bundleID, NO, operation)) return YES;
+    }
+
+    if (appBundlePath.length > 0 && [[NSFileManager defaultManager] fileExistsAtPath:appBundlePath]) {
+        if (vp_register_path(appBundlePath, YES, NO)) return YES;
+    }
+    return !vp_launchservices_has_bundle_id(bundleID);
+}
+
+int vp_uninstall_helper_main(int argc, char *argv[]) {
+    @autoreleasepool {
+        if (argc < 3) return 64;
+        NSString *bundleID = [NSString stringWithUTF8String:argv[2] ?: ""];
+        NSString *appBundlePath = argc >= 4 ? [NSString stringWithUTF8String:argv[3] ?: ""] : @"";
+        return vp_helper_unregister_launchservices(bundleID, appBundlePath) ? 0 : 2;
+    }
+}
+
+static int vp_run_launchservices_unregistration_helper(NSString *bundleID, NSString *appBundlePath, NSString **detailOutput) {
+    NSString *executable = [NSProcessInfo processInfo].arguments.firstObject;
+    if (executable.length == 0 || ![[NSFileManager defaultManager] fileExistsAtPath:executable]) {
+        executable = @"/usr/bin/vphoned";
+    }
+
+    const char *path = executable.fileSystemRepresentation;
+    char *const argv[] = {
+        (char *)path,
+        "--vphone-unregister-app",
+        (char *)bundleID.fileSystemRepresentation,
+        (char *)(appBundlePath ?: @"").fileSystemRepresentation,
+        NULL
+    };
+
+    pid_t pid = 0;
+    int spawnError = posix_spawn(&pid, path, NULL, NULL, argv, NULL);
+    if (spawnError != 0) {
+        if (detailOutput) *detailOutput = [NSString stringWithFormat:@"failed to spawn LaunchServices unregister helper: %s", strerror(spawnError)];
+        return 191;
+    }
+
+    int status = 0;
+    for (int i = 0; i < 40; i++) {
+        pid_t waited = waitpid(pid, &status, WNOHANG);
+        if (waited == pid) {
+            if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+                return 0;
+            }
+            if (detailOutput) {
+                *detailOutput = [NSString stringWithFormat:@"LaunchServices unregister helper failed (status=%d)", status];
+            }
+            return 181;
+        }
+        if (waited < 0) {
+            if (detailOutput) *detailOutput = [NSString stringWithFormat:@"LaunchServices unregister helper wait failed: %s", strerror(errno)];
+            return 191;
+        }
+        usleep(100 * 1000);
+    }
+
+    kill(pid, SIGKILL);
+    waitpid(pid, &status, 0);
+    if (detailOutput) *detailOutput = @"LaunchServices unregister helper timed out";
+    return 181;
+}
+
+static int vp_uninstall_app_by_bundle_id(NSString *bundleID, NSString **detailOutput) {
+    vp_load_private_frameworks();
+
+    if (bundleID.length == 0) {
+        if (detailOutput) *detailOutput = @"missing bundle_id";
+        return 190;
+    }
+    if (!vp_custom_installer_available()) {
+        if (detailOutput) *detailOutput = @"Built-in app uninstaller prerequisites are missing";
+        return 170;
+    }
+    if ([vp_immutable_app_bundle_identifiers() containsObject:bundleID.lowercaseString]) {
+        if (detailOutput) *detailOutput = @"cannot uninstall immutable system app";
+        return 179;
+    }
+
+    LSApplicationProxy *app = [LSApplicationProxy applicationProxyForIdentifier:bundleID];
+    NSString *appBundlePath = app.bundleURL.path;
+    BOOL appBundleExists = appBundlePath.length > 0 && [[NSFileManager defaultManager] fileExistsAtPath:appBundlePath];
+    BOOL launchServicesHadRecord = appBundleExists || vp_launchservices_has_bundle_id(bundleID);
+    if (!launchServicesHadRecord && !appBundleExists) {
+        if (detailOutput) *detailOutput = [NSString stringWithFormat:@"app not installed: %@", bundleID];
+        return 404;
+    }
+
+    NSString *bundleContainerPath = appBundlePath.stringByDeletingLastPathComponent;
+    if (appBundleExists && !vp_is_safe_container_path(bundleContainerPath, @"/Bundle/Application/")) {
+        if (detailOutput) *detailOutput = [NSString stringWithFormat:@"refusing to remove unsafe bundle container: %@", bundleContainerPath ?: @""];
+        return 182;
+    }
+
+    NSString *dataContainerPath = app.dataContainerURL.path;
+    BOOL removeDataContainer = vp_is_safe_container_path(dataContainerPath, @"/Containers/Data/Application/");
+
+    vp_terminate_app(bundleID);
+    vp_sigkill_processes_under_path(bundleContainerPath);
+
+    if (vp_launchservices_has_bundle_id(bundleID)) {
+        NSString *unregisterDetail = nil;
+        int unregisterRet = vp_run_launchservices_unregistration_helper(bundleID, appBundlePath, &unregisterDetail);
+        if (unregisterRet != 0 && unregisterDetail.length > 0) {
+            NSLog(@"vphoned: best-effort LaunchServices unregister failed for %@: %@", bundleID, unregisterDetail);
+        }
+    }
+
+    if (!vp_destroy_mobile_containers(bundleID, detailOutput)) {
+        return 185;
+    }
+    if (!vp_remove_frontboard_state(bundleID, detailOutput)) {
+        return 186;
+    }
+    vp_sync_launchservices();
+
+    if (appBundleExists && !vp_remove_item_if_present(bundleContainerPath, detailOutput)) {
+        return 183;
+    }
+    if (removeDataContainer && !vp_remove_item_if_present(dataContainerPath, detailOutput)) {
+        return 184;
+    }
+    vp_sync_launchservices();
+    if (!vp_wait_for_launchservices_removal(bundleID)) {
+        if (detailOutput) {
+            *detailOutput = [NSString stringWithFormat:@"LaunchServices record remains for %@", bundleID];
+        }
+        return 181;
+    }
+
+    if (detailOutput) {
+        *detailOutput = removeDataContainer
+            ? [NSString stringWithFormat:@"Uninstalled %@ and removed data container", bundleID]
+            : [NSString stringWithFormat:@"Uninstalled %@", bundleID];
+    }
+    return 0;
+}
+
 NSDictionary *vp_handle_custom_install(NSDictionary *msg) {
     vp_load_private_frameworks();
     id reqId = msg[@"id"];
@@ -841,5 +1226,25 @@ NSDictionary *vp_handle_custom_install(NSDictionary *msg) {
     response[@"msg"] = forceSystem
         ? [NSString stringWithFormat:@"Installed via built-in installer as System: %@", detail]
         : [NSString stringWithFormat:@"Installed via built-in installer as User: %@", detail];
+    return response;
+}
+
+NSDictionary *vp_handle_custom_uninstall(NSDictionary *msg) {
+    id reqId = msg[@"id"];
+    NSString *bundleID = msg[@"bundle_id"];
+
+    NSString *detail = @"";
+    int ret = vp_uninstall_app_by_bundle_id(bundleID, &detail);
+    if (ret != 0) {
+        NSMutableDictionary *response = vp_make_response(@"err", reqId);
+        NSString *trimmed = vp_trimmed_output(detail ?: @"");
+        response[@"msg"] = trimmed.length > 0
+            ? [NSString stringWithFormat:@"built-in uninstaller failed (%d)\n%@", ret, trimmed]
+            : [NSString stringWithFormat:@"built-in uninstaller failed (%d)", ret];
+        return response;
+    }
+
+    NSMutableDictionary *response = vp_make_response(@"ok", reqId);
+    response[@"msg"] = detail.length > 0 ? detail : [NSString stringWithFormat:@"Uninstalled %@", bundleID];
     return response;
 }

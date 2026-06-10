@@ -246,6 +246,12 @@ NSDictionary *vp_handle_apps_command(NSDictionary *msg) {
 
     NSMutableArray *result = [NSMutableArray array];
     for (LSApplicationProxy *proxy in allApps) {
+      NSString *bundlePath = proxy.bundleURL.path ?: @"";
+      if ([bundlePath containsString:@"/Bundle/Application/"] &&
+          ![[NSFileManager defaultManager] fileExistsAtPath:bundlePath]) {
+        continue;
+      }
+
       NSString *appType = proxy.applicationType;
       BOOL isSystem = [appType isEqualToString:@"System"];
 
@@ -266,7 +272,7 @@ NSDictionary *vp_handle_apps_command(NSDictionary *msg) {
         @"type" : isSystem ? @"system" : @"user",
         @"state" : state_for_pid(pid),
         @"pid" : @(pid > 0 ? pid : 0),
-        @"path" : proxy.bundleURL.path ?: @"",
+        @"path" : bundlePath,
         @"data_container" : proxy.dataContainerURL.path ?: @"",
       }];
     }

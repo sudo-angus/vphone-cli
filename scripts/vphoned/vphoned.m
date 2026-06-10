@@ -463,6 +463,12 @@ static BOOL handle_client(int fd) {
 
         // App management operations
         if ([t hasPrefix:@"app_"]) {
+          if ([t isEqualToString:@"app_uninstall"]) {
+            NSDictionary *resp = vp_handle_custom_uninstall(msg);
+            if (resp && !vp_write_message(fd, resp))
+              break;
+            continue;
+          }
           NSDictionary *resp = vp_handle_apps_command(msg);
           if (resp && !vp_write_message(fd, resp))
             break;
@@ -537,6 +543,10 @@ int main(int argc, char *argv[]) {
       unlink(CACHE_PATH);
     }
 #endif
+
+    if (argc >= 2 && strcmp(argv[1], "--vphone-unregister-app") == 0) {
+      return vp_uninstall_helper_main(argc, argv);
+    }
 
     // SOCKS5 byte pumps + control writes hit closed peers routinely; default
     // SIGPIPE termination is wrong for a long-running daemon. Ignore so

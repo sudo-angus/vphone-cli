@@ -20,7 +20,7 @@ import ImageIO
 ///   {"t":"type","text":"Hello"}                 → set guest clipboard
 ///
 /// Guest agent commands (forwarded to vphoned via vsock):
-///   app_list, app_launch, app_terminate, open_url, clipboard_set,
+///   app_list, app_launch, app_terminate, app_uninstall, open_url, clipboard_set,
 ///   clipboard_get, file_list, file_push, file_pull, file_mkdir,
 ///   file_delete, ipa_install
 ///
@@ -498,6 +498,31 @@ class VPhoneHostControl {
                 }
                 do {
                     try await ctl.appTerminate(bundleId: bundleId)
+                    box.response = ["ok": true]
+                } catch {
+                    box.response = ["ok": false, "error": "\(error)"]
+                }
+            }
+
+            semaphore.wait()
+            writeJSONResponse(fd, box.response)
+
+        case "app_uninstall":
+            guard let bundleId = json["bundle_id"] as? String else {
+                writeResponse(fd, ok: false, error: "app_uninstall requires bundle_id")
+                return
+            }
+            let semaphore = DispatchSemaphore(value: 0)
+            let box = ResponseBox()
+
+            Task { @MainActor in
+                defer { semaphore.signal() }
+                guard let controller, let ctl = controller.control, ctl.isConnected else {
+                    box.response = ["ok": false, "error": "guest not connected"]
+                    return
+                }
+                do {
+                    try await ctl.appUninstall(bundleId: bundleId)
                     box.response = ["ok": true]
                 } catch {
                     box.response = ["ok": false, "error": "\(error)"]
