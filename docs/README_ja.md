@@ -8,25 +8,30 @@ Apple の Virtualization.framework と PCC の研究用 VM インフラを使用
 
 ## 検証済み環境
 
-| ホスト        | iPhone                | CloudOS       |
-| ------------- | --------------------- | ------------- |
-| Mac16,12 26.3 | `17,3_26.1_23B85`     | `26.1-23B85`  |
-| Mac16,12 26.3 | `17,3_26.3_23D127`    | `26.1-23B85`  |
-| Mac16,12 26.3 | `17,3_26.3_23D127`    | `26.3-23D128` |
-| Mac16,12 26.3 | `17,3_26.3.1_23D8133` | `26.3-23D128` |
+| ホスト        | iPhone                | CloudOS         |
+| ------------- | --------------------- | --------------- |
+| Mac16,12 26.3 | `17,3_26.1_23B85`     | `26.1-23B85`    |
+| Mac16,12 26.3 | `17,3_26.3_23D127`    | `26.1-23B85`    |
+| Mac16,12 26.3 | `17,3_26.3_23D127`    | `26.3-23D128`   |
+| Mac16,12 26.3 | `17,3_26.3.1_23D8133` | `26.3-23D128`   |
+| Mac16,11 26.2 | `17,3_26.4_23E246`    | `26.4-23E5207q` |
+| Mac16,11 26.2 | `17,3_26.5_23F77`     | `26.4-23E5207q` |
 
 ## ファームウェアバリアント
 
-セキュリティバイパスのレベルが異なる4つのパッチバリアントが利用可能です：
+セキュリティバイパスのレベルが異なる5つのパッチバリアントが利用可能です：
 
-| バリアント | ブートチェーン |     CFW     | Make ターゲット                              |
-| ---------- | :------------: | :---------: | -------------------------------------------- |
-| **Patchless** | 3 パッチ     | 2 フェーズ  | `fw_patch_less` + `boot_less`              |
-| **通常版** |   41 パッチ    | 10 フェーズ | `fw_patch` + `cfw_install`                   |
-| **開発版** |   52 パッチ    | 12 フェーズ | `fw_patch_dev` + `cfw_install_dev`           |
-| **脱獄版** |   112 パッチ   | 14 フェーズ | `fw_patch_jb` + `cfw_install_jb`             |
+| バリアント    | ブートチェーン     |     CFW      | Make ターゲット                              |
+| ------------- | :----------------: | :----------: | -------------------------------------------- |
+| **Patchless** | 4 パッチ           | 2 フェーズ   | `fw_patch_less` + `boot_less`              |
+| **通常版**    | 42 パッチ          | 10 フェーズ  | `fw_patch` + `cfw_install`                   |
+| **開発版**    | 53 パッチ          | 12 フェーズ  | `fw_patch_dev` + `cfw_install_dev`           |
+| **脱獄版**    | 113 パッチ         | 14 フェーズ  | `fw_patch_jb` + `cfw_install_jb`             |
+| **実験版**    | 脱獄 + EXP 専用    | 脱獄 + EXP   | `fw_patch_exp` + `cfw_install_exp`           |
 
 > JB最終設定（シンボリックリンク、Sileo、apt、TrollStore）は `/cores/vphone_jb_setup.sh` LaunchDaemon により初回起動時に自動実行されます。進捗確認：`/var/log/vphone_jb_setup.log`。
+
+> **実験版（EXP）** は脱獄版の上位集合で、リサーチブランチの実験的パッチを追加で実行します：カーネルの `hv_vmm_present` sysctl リネーム + カーネル内部呼び出し元の改変（`KernelEXPPatcher`）、サインインブラックリスト付きの DSC バイト5改変 + スロット再認証、watchdogd 精密 2 命令パッチ（EXP-JB-3.5）、fw_patch 時点での DeviceTree アイデンティティプロパティ 8 件、復元後の DT アイデンティティ書き換え（EXP-JB-6）、`SPOOF_BUILD=<id>` によるオプトイン式の `SystemVersion.plist` `ProductBuildVersion` 書き換え（EXP-JB-7）。他のバリアントは意図的に影響を受けません。
 
 詳細なコンポーネントごとの内訳については [research/0_binary_patch_comparison.md](../research/0_binary_patch_comparison.md) を参照してください。
 
@@ -103,6 +108,8 @@ make setup_machine            # 初回起動までを完全自動化（復元/�
 # LESS=1 で patchless バリアント（- AMFI, SSV, Img4, TXM バイパス）
 # DEV=1 で開発バリアント（+ TXM entitlement/デバッグバイパス）
 # JB=1 で脱獄バリアント（dev + 完全セキュリティバイパス）
+# EXP=1 で実験バリアント（脱獄 + リサーチパッチ: hv_vmm リネーム、DT アイデンティティ、復元後書き換え）
+# SPOOF_BUILD=<id>（EXP 限定）SystemVersion.plist の ProductBuildVersion を <id> に書き換え、例: 23F77
 ```
 
 ## 手動セットアップ
@@ -117,6 +124,7 @@ make fw_patch                 # ブートチェーンのパッチ当て（通常
 # または: sudo make fw_patch_less # patchless バリアント（- AMFI, SSV, Img4, TXM バイパス）
 # または: make fw_patch_dev   # 開発バリアント（+ TXM entitlement/デバッグバイパス）
 # または: make fw_patch_jb    # 脱獄バリアント（dev + 完全セキュリティバイパス）
+# または: make fw_patch_exp   # 実験バリアント（脱獄 + リサーチパッチスタック）
 ```
 
 ### クリーンアップ
@@ -186,6 +194,8 @@ python3 -m pymobiledevice3 usbmux forward 2222 22
 # ターミナル 2
 make cfw_install
 # または: make cfw_install_jb        # 脱獄バリアント
+# または: make cfw_install_exp       # 実験バリアント（脱獄 + リサーチパッチスタック）
+# または: SPOOF_BUILD=23F77 make cfw_install_exp   # ProductBuildVersion も書き換え
 ```
 
 ## 初回起動

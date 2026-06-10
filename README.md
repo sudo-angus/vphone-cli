@@ -8,25 +8,30 @@ Boot a virtual iPhone (iOS 26) via Apple's Virtualization.framework using PCC re
 
 ## Tested Environments
 
-| Host          | iPhone                | CloudOS       |
-| ------------- | --------------------- | ------------- |
-| Mac16,12 26.3 | `17,3_26.1_23B85`     | `26.1-23B85`  |
-| Mac16,12 26.3 | `17,3_26.3_23D127`    | `26.1-23B85`  |
-| Mac16,12 26.3 | `17,3_26.3_23D127`    | `26.3-23D128` |
-| Mac16,12 26.3 | `17,3_26.3.1_23D8133` | `26.3-23D128` |
+| Host          | iPhone                | CloudOS         |
+| ------------- | --------------------- | --------------- |
+| Mac16,12 26.3 | `17,3_26.1_23B85`     | `26.1-23B85`    |
+| Mac16,12 26.3 | `17,3_26.3_23D127`    | `26.1-23B85`    |
+| Mac16,12 26.3 | `17,3_26.3_23D127`    | `26.3-23D128`   |
+| Mac16,12 26.3 | `17,3_26.3.1_23D8133` | `26.3-23D128`   |
+| Mac16,11 26.2 | `17,3_26.4_23E246`    | `26.4-23E5207q` |
+| Mac16,11 26.2 | `17,3_26.5_23F77`     | `26.4-23E5207q` |
 
 ## Firmware Variants
 
-Four patch variants are available with increasing levels of security bypass:
+Five patch variants are available with increasing levels of security bypass:
 
-| Variant         | Boot Chain  |    CFW    | Make Targets                        |
-| --------------- | :---------: | :-------: | ----------------------------------- |
-| **Patchless**   | 3 patches   | 2 phases  | `fw_patch_less` + `boot_less`       |
-| **Regular**     | 41 patches  | 10 phases | `fw_patch` + `cfw_install`          |
-| **Development** | 52 patches  | 12 phases | `fw_patch_dev` + `cfw_install_dev`  |
-| **Jailbreak**   | 112 patches | 14 phases | `fw_patch_jb` + `cfw_install_jb`    |
+| Variant          | Boot Chain     |    CFW     | Make Targets                        |
+| ---------------- | :------------: | :--------: | ----------------------------------- |
+| **Patchless**    | 4 patches      | 2 phases   | `fw_patch_less` + `boot_less`       |
+| **Regular**      | 42 patches     | 10 phases  | `fw_patch` + `cfw_install`          |
+| **Development**  | 53 patches     | 12 phases  | `fw_patch_dev` + `cfw_install_dev`  |
+| **Jailbreak**    | 113 patches    | 14 phases  | `fw_patch_jb` + `cfw_install_jb`    |
+| **Experimental** | 141 patches    | 18 phases  | `fw_patch_exp` + `cfw_install_exp`  |
 
 > JB finalization (symlinks, Sileo, apt, TrollStore) runs automatically on first boot via `/cores/vphone_jb_setup.sh` LaunchDaemon. Monitor progress: `/var/log/vphone_jb_setup.log`.
+
+> **Experimental (EXP)** is a JB superset that patches the kernel and DSC to make some Apple services think the device is not a VM, while keeping VM-specific services (graphics passthrough, compute/accel fast paths) working correctly. Other variants are deliberately NOT affected.
 
 See [research/0_binary_patch_comparison.md](./research/0_binary_patch_comparison.md) for the detailed per-component breakdown.
 
@@ -115,6 +120,8 @@ make setup_machine            # full automation through "First Boot" (includes r
 # LESS=1 for patchless variant (- AMFI, SSV, Img4, TXM bypasses)
 # DEV=1 for dev variant (+ TXM entitlement/debug bypasses)
 # JB=1 for jailbreak variant (+ full security bypass)
+# EXP=1 for experimental variant (JB + research patches: hv_vmm rename, DT identity, post-restore rewrite)
+# SPOOF_BUILD=<id> (EXP only) Rewrite SystemVersion.plist ProductBuildVersion to <id>, e.g. 23F77
 ```
 
 ### Splitting `setup_machine` across a host reboot
@@ -160,6 +167,7 @@ make fw_patch                 # patch boot chain (regular variant)
 # or: sudo make fw_patch_less # patchless variant (- AMFI, SSV, Img4, TXM bypasses)
 # or: make fw_patch_dev       # dev variant (+ TXM entitlement/debug bypasses)
 # or: make fw_patch_jb        # jailbreak variant (+ full security bypass)
+# or: make fw_patch_exp       # experimental variant (JB + research stack)
 ```
 
 ### Cleaning
@@ -229,6 +237,8 @@ python3 -m pymobiledevice3 usbmux forward 2222 22
 # terminal 2
 make cfw_install
 # or: make cfw_install_jb        # jailbreak variant
+# or: make cfw_install_exp       # experimental variant (JB + research stack)
+# or: SPOOF_BUILD=23F77 make cfw_install_exp   # additionally rewrite ProductBuildVersion
 ```
 
 ## First Boot

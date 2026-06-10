@@ -6,6 +6,7 @@
 #   - direct iPhone IPSW URLs or local file paths
 #   - version/build selectors for the target device
 #   - listing of all downloadable IPSWs for the target device
+#   - The "VARIANT" environment variable to download apfs_sealvolume for the patchless mode
 #
 # Listing and selection are resolved through the `ipsw` CLI already used
 # elsewhere in this repo, so the script can work with the full downloadable
@@ -410,6 +411,99 @@ extract() {
     cp -R "$cache" "$out"
 }
 
+download_apfs_sealvolume() {
+    local src="$1"
+    local base ios_version filename PROJECT_DIR TOOLS_PREFIX TMP_DIR bn ver BUILD BUILD_MANIFEST RAMDISK_PATH RAMDISK_IM4P RAMDISK MOUNT
+
+    base="$(basename "$src")"
+    ios_version="$(awk -F_ 'NF >= 2 { print $2 }' <<<"$base")"
+
+    if [[ -z "$ios_version" ]]; then
+        echo "Error: could not determine iOS version from filename: $base" >&2
+        return 1
+    fi
+
+    filename="apfs_sealvolume_${ios_version}"
+    
+    PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+    TOOLS_PREFIX="$PROJECT_DIR/.tools"
+
+    if [[ -f "$TOOLS_PREFIX/$filename" ]]; then
+        echo "$filename already present"
+    else
+        echo "Downloading $filename"
+        (
+            TMP_DIR="$(mktemp -d)"
+            trap 'rm -rf "$TMP_DIR"' EXIT
+            
+            # List matching macOS version to the iOS version
+            while IFS= read -r url; do
+                bn="$(basename "$url")"
+                ver="${bn#*_}"
+                ver="${ver%%_*}"
+
+                [[ "$ver" == "$ios_version" ]] || continue
+
+                BUILD="$(awk -F_ '{print $3}' <<<"$bn")"
+                break
+            done < <(
+              ipsw download appledb \
+              --os macOS \
+              --version $ios_version \
+              --urls
+            )
+            
+            if [[ -z "${BUILD:-}" ]]; then
+                echo "Error: failed to determine macOS build from available URLs" >&2
+                          exit 1
+            fi
+            
+            # Download BuildManifest first
+            ipsw download appledb \
+              --os macOS \
+              --build $BUILD \
+              --pattern "^BuildManifest.plist\$" \
+              --output "$TMP_DIR"
+            
+            BUILD_MANIFEST="$(find "$TMP_DIR" -name BuildManifest.plist -print -quit)"
+            if [ -z "$BUILD_MANIFEST" ]; then
+              echo "Failed to locate BuildManifest.plist"
+              exit 1
+            fi
+            
+            RAMDISK_PATH="$(/usr/bin/plutil -extract 'BuildIdentities.0.Manifest.RestoreRamDisk.Info.Path' raw -o - "$BUILD_MANIFEST")"
+            if [ -z "$RAMDISK_PATH" ]; then
+              echo "Failed to read RestoreRamDisk path from BuildManifest"
+              exit 1
+            fi
+            
+            # Download the ramdisk referenced by BuildManifest
+            ipsw download appledb \
+              --os macOS \
+              --build $BUILD \
+              --pattern "$RAMDISK_PATH" \
+              --output "$TMP_DIR"
+
+            RAMDISK_IM4P="$(find "$TMP_DIR" -path "*${RAMDISK_PATH}" -print -quit)"
+            if [ -z "$RAMDISK_IM4P" ]; then
+              echo "Failed to locate downloaded ramdisk: $RAMDISK_PATH"
+              exit 1
+            fi
+
+            RAMDISK="$TMP_DIR/ramdisk.dmg"
+            ipsw img4 im4p extract --output "$RAMDISK" "$RAMDISK_IM4P"
+
+            MOUNT=$(hdiutil attach -readonly -nobrowse "$RAMDISK" | awk 'END{ print$NF}')
+            cp "$MOUNT/System/Library/Filesystems/apfs.fs/Contents/Resources/apfs_sealvolume" \
+            "$TOOLS_PREFIX/$filename"
+            hdiutil detach "$MOUNT" >/dev/null 2>&1 || true
+        )
+        echo "  Downloaded: $TOOLS_PREFIX/$filename"
+        echo "  Resigning $filename"
+        codesign --force --sign - "$TOOLS_PREFIX/$filename"
+    fi
+}
+
 LIST_FIRMWARES="${LIST_FIRMWARES:-0}"
 IPHONE_DEVICE="${IPHONE_DEVICE:-$DEFAULT_IPHONE_DEVICE}"
 IPHONE_VERSION="${IPHONE_VERSION:-}"
@@ -536,6 +630,13 @@ echo ""
 
 fetch "$IPHONE_SOURCE" "$IPHONE_IPSW_PATH"
 fetch "$CLOUDOS_SOURCE" "$CLOUDOS_IPSW_PATH"
+
+VARIANT="${VARIANT:-}"
+if [[ "$VARIANT" == "less" ]]; then
+    download_apfs_sealvolume "$IPHONE_SOURCE"
+else
+    echo "==> Downloading apfs sealvolume (skipped — patchless variant only)"
+fi
 
 IPHONE_CACHE="${IPSW_DIR}/${IPHONE_DIR}"
 CLOUDOS_CACHE="${IPSW_DIR}/${CLOUDOS_DIR}"

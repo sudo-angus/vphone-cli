@@ -8,25 +8,30 @@
 
 ## 测试环境
 
-| 主机          | iPhone 系统           | CloudOS       |
-| ------------- | --------------------- | ------------- |
-| Mac16,12 26.3 | `17,3_26.1_23B85`     | `26.1-23B85`  |
-| Mac16,12 26.3 | `17,3_26.3_23D127`    | `26.1-23B85`  |
-| Mac16,12 26.3 | `17,3_26.3_23D127`    | `26.3-23D128` |
-| Mac16,12 26.3 | `17,3_26.3.1_23D8133` | `26.3-23D128` |
+| 主机          | iPhone 系统           | CloudOS         |
+| ------------- | --------------------- | --------------- |
+| Mac16,12 26.3 | `17,3_26.1_23B85`     | `26.1-23B85`    |
+| Mac16,12 26.3 | `17,3_26.3_23D127`    | `26.1-23B85`    |
+| Mac16,12 26.3 | `17,3_26.3_23D127`    | `26.3-23D128`   |
+| Mac16,12 26.3 | `17,3_26.3.1_23D8133` | `26.3-23D128`   |
+| Mac16,11 26.2 | `17,3_26.4_23E246`    | `26.4-23E5207q` |
+| Mac16,11 26.2 | `17,3_26.5_23F77`     | `26.4-23E5207q` |
 
 ## 固件变体
 
-提供四种补丁变体，安全绕过级别逐步递增：
+提供五种补丁变体，安全绕过级别逐步递增：
 
-| 变体          | 启动链     | 自定义固件 | Make 目标                                   |
-| ------------- | :--------: | :--------: | ------------------------------------------- |
-| **Patchless** | 3 个补丁   | 2 个阶段   | `fw_patch_less` + `boot_less`              |
-| **常规版**    | 41 个补丁  | 10 个阶段  | `fw_patch` + `cfw_install`                  |
-| **开发版**    | 52 个补丁  | 12 个阶段  | `fw_patch_dev` + `cfw_install_dev`          |
-| **越狱版**    | 112 个补丁 | 14 个阶段  | `fw_patch_jb` + `cfw_install_jb`            |
+| 变体           | 启动链           | 自定义固件 | Make 目标                                   |
+| -------------- | :--------------: | :--------: | ------------------------------------------- |
+| **Patchless**  | 4 个补丁         | 2 个阶段   | `fw_patch_less` + `boot_less`              |
+| **常规版**     | 42 个补丁        | 10 个阶段  | `fw_patch` + `cfw_install`                  |
+| **开发版**     | 53 个补丁        | 12 个阶段  | `fw_patch_dev` + `cfw_install_dev`          |
+| **越狱版**     | 113 个补丁       | 14 个阶段  | `fw_patch_jb` + `cfw_install_jb`            |
+| **实验版**     | 越狱 + EXP 专属  | 越狱 + EXP | `fw_patch_exp` + `cfw_install_exp`          |
 
 > 越狱最终配置（符号链接、Sileo、apt、TrollStore）通过 `/cores/vphone_jb_setup.sh` LaunchDaemon 在首次启动时自动运行。查看进度：`/var/log/vphone_jb_setup.log`。
+
+> **实验版（EXP）** 是越狱版的超集，额外运行研究分支中的实验性补丁：内核 `hv_vmm_present` sysctl 重命名 + 内核内部调用者改写（`KernelEXPPatcher`）、带登录黑名单的 DSC 字节 5 改写 + slot 重新认证、watchdogd 精准 2 条指令补丁（EXP-JB-3.5）、固件补丁阶段的 8 项 DeviceTree 身份属性、还原后 DT 身份重写（EXP-JB-6）、以及通过 `SPOOF_BUILD=<id>` 可选启用的 `SystemVersion.plist` `ProductBuildVersion` 改写（EXP-JB-7）。其他变体不受影响。
 
 详见 [research/0_binary_patch_comparison.md](../research/0_binary_patch_comparison.md) 了解各组件的详细分项对比。
 
@@ -103,6 +108,8 @@ make setup_machine            # 完全自动化完成"首次启动"流程（包�
 # LESS=1 patchless 变体（- AMFI、SSV、Img4、TXM 绕过）
 # DEV=1 开发变体（+ TXM 权限/调试绕过）
 # JB=1 越狱变体（dev + 完整安全绕过）
+# EXP=1 实验变体（越狱 + 研究补丁：hv_vmm 重命名、DT 身份、还原后重写）
+# SPOOF_BUILD=<id> （仅 EXP）将 SystemVersion.plist 的 ProductBuildVersion 改写为 <id>，例如 23F77
 ```
 
 ## 手动设置
@@ -117,6 +124,7 @@ make fw_patch                 # 修补启动链（常规变体）
 # 或：sudo make fw_patch_less # patchless 变体（- AMFI、SSV、Img4、TXM 绕过）
 # 或：make fw_patch_dev       # 开发变体（+ TXM 权限/调试绕过）
 # 或：make fw_patch_jb        # 越狱变体（dev + 完整安全绕过）
+# 或：make fw_patch_exp       # 实验变体（越狱 + 研究补丁栈）
 ```
 
 ### 清理
@@ -186,6 +194,8 @@ python3 -m pymobiledevice3 usbmux forward 2222 22
 # 终端 2
 make cfw_install
 # 或：make cfw_install_jb        # 越狱变体
+# 或：make cfw_install_exp       # 实验变体（越狱 + 研究补丁栈）
+# 或：SPOOF_BUILD=23F77 make cfw_install_exp   # 同时改写 ProductBuildVersion
 ```
 
 ## 首次启动

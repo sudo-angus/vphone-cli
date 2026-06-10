@@ -15,6 +15,7 @@ import Img4tool
 
 enum ProcessError: Error {
     case failed(Int32, String)
+    case notExecutable(String)
 }
 
 extension Data {
@@ -394,6 +395,18 @@ public final class CryptexFilesystemPatcher: Patcher {
         return im4pPath
     }
     
+    private func identifyApfsSealvolume() throws -> URL {
+        let iosVersion = try getProductVersion()
+        let path = self.vphoneCliDirectory.appending(path: ".tools/apfs_sealvolume_\(iosVersion)")
+        guard FileManager.default.fileExists(atPath: path.path) else {
+            throw FirmwareManifest.ManifestError.fileNotFound(path.path)
+        }
+        guard FileManager.default.isExecutableFile(atPath: path.path) else {
+            throw ProcessError.notExecutable(path.path)
+        }
+        return path
+    }
+    
     func createDigestAndHash(filesystem: URL, mtree: URL, remap: Bool) throws -> (URL, URL) {
         let (device, mount) = try attachImage(path: filesystem)
         defer { try? detachImage(deviceNode: device) }
@@ -402,6 +415,7 @@ public final class CryptexFilesystemPatcher: Patcher {
         let digestDbPath = tmpDir.appending(path: "digest.db")
         let rootHashPath = tmpDir.appending(path: "root_hash")
         let mtreeRemapPath = tmpDir.appending(path: "mtree_remap.xml")
+        let sealLogPath = tmpDir.appending(path: "seal.log")
         
         // We want to get the nanosecond timestamp of the last modification before the mtree collection.
         // We know that we remove directories in /private/var in removeSpecificSystemFiles last.
@@ -423,13 +437,14 @@ public final class CryptexFilesystemPatcher: Patcher {
         FileManager.default.createFile(atPath: mtreeRemapPath.path, contents: remapContent.data(using: .utf8))
 
         try unmount(mount: mount)
-        let sealvolume = self.vphoneCliDirectory.appending(path: ".tools/apfs_sealvolume")
+        let sealvolume = try identifyApfsSealvolume()
+        FileManager.default.createFile(atPath: sealLogPath.path, contents: nil)
         _ = try runProcess(sealvolume.path, [
             "-R", mtreeRemapPath.path,
             "-U", digestDbPath.path, // Save digest records
             "-M", rootHashPath.path, // Save root hash
             device
-        ])
+        ], output: sealLogPath)
         return (digestDbPath, rootHashPath)
     }
     
@@ -613,6 +628,14 @@ public final class CryptexFilesystemPatcher: Patcher {
 
         let remaining = childPath.dropFirst(basePath.count)
         return remaining.joined(separator: "/")
+    }
+    
+    func getProductVersion() throws -> String {
+        let root = try parsePlist(data: buildManiest)
+        guard let productVersion = root["ProductVersion"] as? String else {
+            throw FirmwareManifest.ManifestError.missingKey("ProductVersion in BuildManifest")
+        }
+        return productVersion
     }
     
     func getTrustcachePath() throws -> String {

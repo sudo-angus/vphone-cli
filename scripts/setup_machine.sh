@@ -70,6 +70,7 @@ NO_VPHONED_RAW="${NO_VPHONED:-0}"
 NO_VPHONED=0
 JB_MODE=0
 DEV_MODE=0
+EXP_MODE=0
 LESS_MODE=0
 SKIP_PROJECT_SETUP=0
 PHASE="all"
@@ -971,6 +972,9 @@ parse_args() {
       --dev)
         DEV_MODE=1
         ;;
+      --exp)
+        EXP_MODE=1
+        ;;
       --less)
         LESS_MODE=1
         ;;
@@ -982,11 +986,15 @@ parse_args() {
         ;;
       -h|--help)
         cat <<'EOF'
-Usage: setup_machine.sh [--jb] [--dev] [--less] [--skip-project-setup] [--phase=all|prep|install]
+Usage: setup_machine.sh [--jb] [--dev] [--exp] [--less] [--skip-project-setup] [--phase=all|prep|install]
 
 Options:
   --jb                    Use jailbreak firmware patching + jailbreak CFW install.
   --dev                   Use dev firmware patching + dev CFW install.
+  --exp                   Use experimental firmware patching + EXP CFW install
+                          (JB + kernel hv_vmm rename, DSC byte-5 mangle, watchdogd
+                          surgical patch, DT identity properties, post-restore DT
+                          rewrite, opt-in build-version spoof via SPOOF_BUILD).
   --less                  Use patchless firmware patching + CFW install.
   --skip-project-setup    Skip setup_tools/build stage.
   --phase=all             Default. Run the full pipeline in one shot.
@@ -1004,6 +1012,8 @@ Environment:
   SUDO_PASSWORD=...       Preload sudo credential via askpass.
   NO_BINPACK=1            Excludes the SSH, VNC, ... binaries from being installed (patchless-only, currently)
   NO_VPHONED=1            Excludes vphoned from being installed (patchless-only, currently)
+  SPOOF_BUILD=<id>        (EXP only) Rewrite SystemVersion.plist ProductBuildVersion
+                          to <id> (e.g. 23F77). Omitted/empty -> skipped.
 EOF
         exit 0
         ;;
@@ -1064,8 +1074,8 @@ main() {
   local cfw_install_target="cfw_install"
   local mode_label="base"
 
-  if (( JB_MODE + DEV_MODE + LESS_MODE > 1 )); then
-    die "--jb, --dev, and --less are mutually exclusive"
+  if (( JB_MODE + DEV_MODE + EXP_MODE + LESS_MODE > 1 )); then
+    die "--jb, --dev, --exp, and --less are mutually exclusive"
   fi
 
   if [[ "$LESS_MODE" -eq 1 && "$PHASE" != "all" ]]; then
@@ -1080,6 +1090,10 @@ main() {
     fw_patch_target="fw_patch_dev"
     cfw_install_target="cfw_install_dev"
     mode_label="dev"
+  elif [[ "$EXP_MODE" -eq 1 ]]; then
+    fw_patch_target="fw_patch_exp"
+    cfw_install_target="cfw_install_exp"
+    mode_label="experimental"
   elif [[ "$LESS_MODE" -eq 1 ]]; then
     fw_patch_target="fw_patch_less"
     cfw_install_target=""
@@ -1099,11 +1113,7 @@ main() {
       install_brew_deps
       ensure_python_linked
 
-      if [[ "$LESS_MODE" -eq 1 ]]; then
-        VARIANT=less run_make "Project setup" setup_tools
-      else
-        run_make "Project setup" setup_tools
-      fi
+      run_make "Project setup" setup_tools
       run_make "Project setup" build
     fi
 
@@ -1112,10 +1122,11 @@ main() {
     export PATH="$PROJECT_ROOT/.venv/bin:$PATH"
 
     run_make "Firmware prep" vm_new
-    run_make "Firmware prep" fw_prepare
     if [[ "$LESS_MODE" -eq 0 ]]; then
+      run_make "Firmware prep" fw_prepare
       run_make "Firmware patch" "$fw_patch_target"
     else
+      VARIANT=less run_make "Firmware prep" fw_prepare
       run_make_sudo "Firmware patch" "$fw_patch_target"
     fi
 
@@ -1140,6 +1151,8 @@ main() {
       echo "      make setup_machine_install JB=1"
     elif [[ "$DEV_MODE" -eq 1 ]]; then
       echo "      make setup_machine_install DEV=1"
+    elif [[ "$EXP_MODE" -eq 1 ]]; then
+      echo "      make setup_machine_install EXP=1"
     else
       echo "      make setup_machine_install"
     fi
@@ -1204,7 +1217,7 @@ main() {
     BOOT_FIFO=""
   fi
 
-  if [[ "$JB_MODE" -eq 1 ]]; then
+  if [[ "$JB_MODE" -eq 1 || "$EXP_MODE" -eq 1 ]]; then
     echo ""
     echo "=== JB Finalize ==="
     echo "[*] JB finalization will run automatically on first normal boot"

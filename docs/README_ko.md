@@ -8,25 +8,30 @@ PCC 리서치 VM 인프라와 Apple의 Virtualization.framework를 사용하여 
 
 ## 테스트된 환경
 
-| Host          | iPhone                | CloudOS       |
-| ------------- | --------------------- | ------------- |
-| Mac16,12 26.3 | `17,3_26.1_23B85`     | `26.1-23B85`  |
-| Mac16,12 26.3 | `17,3_26.3_23D127`    | `26.1-23B85`  |
-| Mac16,12 26.3 | `17,3_26.3_23D127`    | `26.3-23D128` |
-| Mac16,12 26.3 | `17,3_26.3.1_23D8133` | `26.3-23D128` |
+| Host          | iPhone                | CloudOS         |
+| ------------- | --------------------- | --------------- |
+| Mac16,12 26.3 | `17,3_26.1_23B85`     | `26.1-23B85`    |
+| Mac16,12 26.3 | `17,3_26.3_23D127`    | `26.1-23B85`    |
+| Mac16,12 26.3 | `17,3_26.3_23D127`    | `26.3-23D128`   |
+| Mac16,12 26.3 | `17,3_26.3.1_23D8133` | `26.3-23D128`   |
+| Mac16,11 26.2 | `17,3_26.4_23E246`    | `26.4-23E5207q` |
+| Mac16,11 26.2 | `17,3_26.5_23F77`     | `26.4-23E5207q` |
 
 ## 펌웨어 변형
 
-보안 우회 수준이 다른 4가지 패치 변형을 사용할 수 있습니다:
+보안 우회 수준이 다른 5가지 패치 변형을 사용할 수 있습니다:
 
-| 변형         | 부트 체인 |    CFW    | Make 타겟                                   |
-| ------------ | :-------: | :-------: | ------------------------------------------- |
-| **Patchless** |  3 패치   | 2 페이즈  | `fw_patch_less` + `boot_less`             |
-| **일반**     |  41 패치  | 10 페이즈 | `fw_patch` + `cfw_install`                  |
-| **개발**     |  52 패치  | 12 페이즈 | `fw_patch_dev` + `cfw_install_dev`          |
-| **탈옥**     | 112 패치  | 14 페이즈 | `fw_patch_jb` + `cfw_install_jb`            |
+| 변형           | 부트 체인         |    CFW     | Make 타겟                                   |
+| -------------- | :---------------: | :--------: | ------------------------------------------- |
+| **Patchless**  |  4 패치           | 2 페이즈   | `fw_patch_less` + `boot_less`             |
+| **일반**       |  42 패치          | 10 페이즈  | `fw_patch` + `cfw_install`                  |
+| **개발**       |  53 패치          | 12 페이즈  | `fw_patch_dev` + `cfw_install_dev`          |
+| **탈옥**       | 113 패치          | 14 페이즈  | `fw_patch_jb` + `cfw_install_jb`            |
+| **실험**       | 탈옥 + EXP 전용   | 탈옥 + EXP | `fw_patch_exp` + `cfw_install_exp`          |
 
 > JB 최종 설정(심볼릭 링크, Sileo, apt, TrollStore)은 `/cores/vphone_jb_setup.sh` LaunchDaemon을 통해 첫 번째 부팅 시 자동으로 실행됩니다. 진행 상황 확인: `/var/log/vphone_jb_setup.log`.
+
+> **실험(EXP)** 변형은 탈옥 변형의 상위 집합으로, 연구 브랜치의 실험적 패치를 추가로 실행합니다: 커널 `hv_vmm_present` sysctl 이름 변경 + 커널 내부 호출자 변조(`KernelEXPPatcher`), 로그인 블랙리스트가 있는 DSC 바이트 5 변조 + 슬롯 재인증, watchdogd 정밀 2개 명령어 패치(EXP-JB-3.5), 펌웨어 패치 단계의 DeviceTree 식별 속성 8개, 복원 후 DT 식별 재작성(EXP-JB-6), 그리고 `SPOOF_BUILD=<id>`를 통한 옵트인 `SystemVersion.plist` `ProductBuildVersion` 재작성(EXP-JB-7). 다른 변형은 의도적으로 영향을 받지 않습니다.
 
 컴포넌트별 상세 분류는 [research/0_binary_patch_comparison.md](../research/0_binary_patch_comparison.md)를 참조하세요.
 
@@ -103,6 +108,8 @@ make setup_machine            # "First Boot"까지의 전체 과정 자동화 (�
 # LESS=1 Patchless 변형 (- AMFI, SSV, Img4, TXM 우회)
 # DEV=1 개발 변형 (+ TXM 권한/디버그 우회)
 # JB=1 탈옥 변형 (dev + 전체 보안 우회)
+# EXP=1 실험 변형 (탈옥 + 연구 패치: hv_vmm 이름 변경, DT 식별, 복원 후 재작성)
+# SPOOF_BUILD=<id> (EXP 전용) SystemVersion.plist의 ProductBuildVersion을 <id>로 재작성, 예: 23F77
 ```
 
 ## 수동 설정
@@ -117,6 +124,7 @@ make fw_patch                 # 부트 체인 패치 (일반 변형)
 # 또는: sudo make fw_patch_less # Patchless 변형 (- AMFI, SSV, Img4, TXM 우회)
 # 또는: make fw_patch_dev     # 개발 변형 (+ TXM 권한/디버그 우회)
 # 또는: make fw_patch_jb      # 탈옥 변형 (dev + 전체 보안 우회)
+# 또는: make fw_patch_exp     # 실험 변형 (탈옥 + 연구 패치 스택)
 ```
 
 ### 정리
@@ -186,6 +194,8 @@ python3 -m pymobiledevice3 usbmux forward 2222 22
 # 터미널 2
 make cfw_install
 # 또는: make cfw_install_jb        # 탈옥 변형
+# 또는: make cfw_install_exp       # 실험 변형 (탈옥 + 연구 패치 스택)
+# 또는: SPOOF_BUILD=23F77 make cfw_install_exp   # 추가로 ProductBuildVersion 재작성
 ```
 
 ## 첫 부팅

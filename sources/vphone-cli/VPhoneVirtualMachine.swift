@@ -20,6 +20,7 @@ class VPhoneVirtualMachine: NSObject, VZVirtualMachineDelegate {
         case regular
         case dev
         case jb
+        case exp
     }
     
     struct Options {
@@ -228,6 +229,8 @@ class VPhoneVirtualMachine: NSObject, VZVirtualMachineDelegate {
         // VTParavirtualizationHostSessionDeliverMessageFromGuest=-19093,VZ 最终
         // 以 VZErrorInternal "stopped unexpectedly" 把整个 VM 拆掉。等 guest
         // MACF 路径修好再恢复;代价是 guest 走软解 VT/ANE。
+        // 恢复时注意上游已是三件套:_VZMacVideoToolboxDeviceConfiguration、
+        // _VZMacNeuralEngineDeviceConfiguration、_VZMacScalerAcceleratorDeviceConfiguration。
 
         // Multi-touch (USB touch screen)
         if let obj = Dynamic._VZUSBTouchScreenConfiguration().asObject {
