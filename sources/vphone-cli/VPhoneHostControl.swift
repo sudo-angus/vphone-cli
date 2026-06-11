@@ -416,6 +416,29 @@ class VPhoneHostControl {
             semaphore.wait()
             writeResponse(fd, ok: result.ok, error: result.error, image: result.imageBase64)
 
+        case "health":
+            // Cheap liveness probe for the manager's heartbeat: answer straight
+            // from cached state (no guest round-trip). A response at all proves
+            // the host app's run loop is servicing requests; `connected`
+            // reflects the vsock handshake. If the main actor is wedged this
+            // Task never runs and the caller times out — which is the signal.
+            let semaphore = DispatchSemaphore(value: 0)
+            let box = ResponseBox()
+            Task { @MainActor in
+                defer { semaphore.signal() }
+                box.response = [
+                    "ok": true,
+                    "connected": controller?.control?.isConnected ?? false,
+                    "caps": controller?.control?.guestCaps ?? [],
+                    // Wedge-shaped failure streak (connect callback dropped /
+                    // handshake stalled). A still-booting guest leaves this at 0;
+                    // a wedged VZ helper climbs it. Lets the manager recover fast.
+                    "vsock_stall": controller?.control?.vsockStallStreak ?? 0,
+                ]
+            }
+            semaphore.wait()
+            writeJSONResponse(fd, box.response)
+
         // -----------------------------------------------------------------
         // Guest agent commands (forwarded to vphoned via VPhoneControl)
         // -----------------------------------------------------------------

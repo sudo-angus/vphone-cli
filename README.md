@@ -275,6 +275,32 @@ shutdown -h now
 make boot
 ```
 
+## VM Manager (GUI)
+
+Instead of driving VMs from the terminal, you can use the **VPhone** manager — a
+Dock app that lists every VM, starts/stops/restarts them, monitors guest health,
+captures per-VM logs, and authorizes the AMFI bypass once via a scoped sudoers
+rule.
+
+```bash
+make install_app   # one-shot: submodules + tools + build + /Applications launcher
+```
+
+This is the only command a fresh clone needs for the GUI entry. It is idempotent
+— it initializes the vendor SPM submodules, runs `setup_tools` once if host tools
+are missing (`ldid`, venv), builds and ad-hoc-signs the bundles, then symlinks
+`/Applications/VPhone.app` so the app shows up in Spotlight / Launchpad / Dock.
+No `sudo` (`/Applications` is admin-writable) and no Apple Developer account
+(ad-hoc signing on an AMFI-disabled host). Launch it as **VPhone**, or:
+
+```bash
+open -a VPhone
+```
+
+The symlink targets your clone's build, so every later `make build` is reflected
+with no re-install. To launch the manager directly without installing the
+launcher, use `make manage`. Remove the launcher with `make uninstall_app`.
+
 ## Optional Host TCP Workaround
 
 If the host is behind a corporate VPN / traffic-forwarding agent and the guest

@@ -10,6 +10,9 @@ class VPhoneWindowController: NSObject, NSToolbarDelegate {
     private weak var virtualMachineView: VPhoneVirtualMachineView?
     private(set) var touchIDMonitor: VPhoneTouchIDMonitor?
     private var ecid: String?
+    /// Window-title prefix — the manager display name (or VM directory name),
+    /// so multiple booted VMs are distinguishable at a glance. "VPHONE" if unset.
+    private var name = "VPHONE"
 
     private nonisolated static let homeItemID = NSToolbarItem.Identifier("home")
 
@@ -19,10 +22,11 @@ class VPhoneWindowController: NSObject, NSToolbarDelegate {
 
     func showWindow(
         for vm: VZVirtualMachine, screenWidth: Int, screenHeight: Int, screenScale: Double,
-        keyHelper: VPhoneKeyHelper, control: VPhoneControl, ecid: String?
+        keyHelper: VPhoneKeyHelper, control: VPhoneControl, ecid: String?, displayName: String?
     ) {
         self.control = control
         self.ecid = ecid
+        if let displayName, !displayName.isEmpty { name = displayName }
 
         let view = VPhoneVirtualMachineView()
         view.virtualMachine = vm
@@ -46,7 +50,7 @@ class VPhoneWindowController: NSObject, NSToolbarDelegate {
 
         window.isReleasedWhenClosed = false
         window.contentAspectRatio = windowSize
-        window.title = "VPHONE [loading]"
+        window.title = "\(name) [loading]"
         window.subtitle = makeSubtitle(ip: nil)
         window.contentView = vmView
         if let ecid {
@@ -82,7 +86,7 @@ class VPhoneWindowController: NSObject, NSToolbarDelegate {
             [weak self, weak window] _ in
             Task { @MainActor in
                 guard let self, let window, let control = self.control else { return }
-                window.title = control.isConnected ? "VPHONE [connected]" : "VPHONE [disconnected]"
+                window.title = control.isConnected ? "\(self.name) [connected]" : "\(self.name) [disconnected]"
                 window.subtitle = self.makeSubtitle(ip: control.isConnected ? control.guestIP : nil)
             }
         }

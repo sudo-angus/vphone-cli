@@ -6,7 +6,7 @@ struct VPhoneCLI: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "vphone-cli",
         abstract: "Boot a virtual iPhone or patch firmware with the Swift pipeline",
-        subcommands: [VPhoneBootCLI.self, PatchFirmwareCLI.self, PatchComponentCLI.self],
+        subcommands: [VPhoneBootCLI.self, VPhoneManageCLI.self, PatchFirmwareCLI.self, PatchComponentCLI.self],
         defaultSubcommand: VPhoneBootCLI.self
     )
 }
@@ -46,6 +46,12 @@ struct VPhoneBootCLI: ParsableCommand {
     
     @Option(help: "Firmware variant to execute.")
     var variant: PatchFirmwareCLI.VariantOption = .regular
+
+    @Option(
+        name: .customLong("display-name"),
+        help: "Human-facing name shown in the VM window title (defaults to the VM directory name)."
+    )
+    var displayName: String?
 
     @Flag(help: "Do not attach a USB keyboard device so the iOS software keyboard appears")
     var softwareKeyboard: Bool = false
@@ -165,6 +171,11 @@ struct VPhoneBootCLI: ParsableCommand {
 
         let vmDir = config.deletingLastPathComponent()
 
+        // Prefer the explicit name the manager passes; otherwise fall back to the
+        // VM directory name so a direct `make boot` window is still identifiable.
+        let trimmedName = displayName?.trimmingCharacters(in: .whitespaces) ?? ""
+        let resolvedDisplayName = trimmedName.isEmpty ? vmDir.lastPathComponent : trimmedName
+
         return VPhoneVirtualMachine.Options(
             configURL: config,
             romURL: manifest.romImages != nil ? manifest.resolve(path: manifest.romImages!.avpBooter, in: vmDir) : nil,
@@ -181,7 +192,8 @@ struct VPhoneBootCLI: ParsableCommand {
             kernelDebugPort: kernelDebugPort,
             variant: variant.virtualMachineVariant,
             softwareKeyboard: softwareKeyboard,
-            noVphoned: self.noVphoned
+            noVphoned: self.noVphoned,
+            displayName: resolvedDisplayName
         )
     }
 

@@ -18,6 +18,10 @@ class VPhoneControl {
     private static let vsockPort: UInt32 = 1337
     private static let reconnectDelay: TimeInterval = 3
     private static let handshakeTimeout: TimeInterval = 8
+    /// Watchdog for `device.connect(toPort:)` itself. A connect to a non-listening
+    /// guest fails with ECONNRESET in milliseconds; if the call takes this long
+    /// the VZ vsock helper has wedged and dropped the completion handler.
+    private static let connectTimeout: TimeInterval = 8
     private static let defaultRequestTimeout: TimeInterval = 10
     private static let slowRequestTimeout: TimeInterval = 30
     private static let transferRequestTimeout: TimeInterval = 180
@@ -42,6 +46,18 @@ class VPhoneControl {
     private var nextRequestId: UInt64 = 0
     private var connectionAttemptToken: UInt64 = 0
     private var reconnectWorkItem: DispatchWorkItem?
+    /// Settles the current connect attempt exactly once: whichever of the
+    /// completion handler or the connect watchdog runs first sets this, and the
+    /// other no-ops. Reset at the start of every attempt.
+    private var currentConnectResolved = false
+    /// Consecutive vsock attempts that failed in the *wedge* fingerprint —
+    /// connect callback dropped, or handshake stalled — as opposed to a
+    /// still-booting guest, which fails connect promptly with ECONNRESET and
+    /// leaves this at 0. Reset on a clean connect. Surfaced to the manager's
+    /// health probe so a wedge is recovered in ~20 s instead of the generous
+    /// ~120 s guest-down fallback. See
+    /// research/vsock_helper_wedge_on_burst_econnreset.md.
+    private(set) var vsockStallStreak = 0
     public var variant: VPhoneVirtualMachine.Variant = .regular
 
     init(variant: VPhoneVirtualMachine.Variant) {
@@ -154,21 +170,29 @@ class VPhoneControl {
         guard let device else { return }
         connectionAttemptToken += 1
         let attemptToken = connectionAttemptToken
+        currentConnectResolved = false
         device.connect(toPort: Self.vsockPort) {
             [weak self] (result: Result<VZVirtioSocketConnection, any Error>) in
             Task { @MainActor in
                 guard let self else { return }
                 guard self.isCurrentAttempt(attemptToken) else { return }
+                // The connect watchdog may have already given up on this attempt.
+                guard !self.currentConnectResolved else { return }
+                self.currentConnectResolved = true
                 switch result {
                 case let .success(conn):
                     self.connection = conn
                     self.performHandshake(fd: conn.fileDescriptor, attemptToken: attemptToken)
                 case let .failure(error):
+                    // A prompt failure means the helper is responsive (the guest
+                    // just isn't listening yet) — a normal step of the boot
+                    // window, not the wedge. Leave vsockStallStreak untouched.
                     print("[control] connect failed: \(error)")
                     self.scheduleReconnect(for: attemptToken, reason: "connect failed")
                 }
             }
         }
+        armConnectTimeout(attemptToken: attemptToken)
     }
 
     // MARK: - Handshake
@@ -191,6 +215,7 @@ class VPhoneControl {
                     guard let self else { return }
                     guard self.isCurrentAttempt(attemptToken, fd: fd) else { return }
                     print("[control] handshake: no response")
+                    self.vsockStallStreak += 1 // connect succeeded but guest→host stalled — wedge fingerprint
                     self.disconnect(ifCurrentAttempt: attemptToken)
                 }
                 return
@@ -217,6 +242,7 @@ class VPhoneControl {
                 self.guestCaps = caps
                 self.guestIP = ip
                 self.isConnected = true
+                self.vsockStallStreak = 0 // clean connect — helper is healthy
                 let ipSuffix = ip.map { " (\($0))" } ?? ""
                 print("[control] connected to \(name) v\(version)\(ipSuffix), caps: \(caps)")
 
@@ -896,8 +922,33 @@ class VPhoneControl {
             guard isCurrentAttempt(attemptToken, fd: fd) else { return }
             guard !isConnected else { return }
             print("[control] handshake timed out after \(Int(timeout.rounded()))s")
+            vsockStallStreak += 1 // connect succeeded but guest→host stalled — wedge fingerprint
             Self.shutdownSocket(fd: fd)
             disconnect(ifCurrentAttempt: attemptToken)
+        }
+    }
+
+    /// Watchdog for the connect call itself. When the VZ vsock helper wedges, the
+    /// `device.connect(toPort:)` completion handler is silently never invoked —
+    /// and since the reconnect loop only re-arms from inside that handler, the
+    /// loop stalls with no further log output until the manager's slow health
+    /// timer notices (observed: a real connect to a non-listening guest fails
+    /// with ECONNRESET in ~1 ms, but a wedged helper dropped the callback for
+    /// ~100 s until the VM was restarted). This timer settles the attempt as a
+    /// counted stall so the loop keeps retrying visibly and the wedge becomes a
+    /// fast, machine-readable signal for the manager.
+    private func armConnectTimeout(attemptToken: UInt64) {
+        let timeout = Self.connectTimeout
+        DispatchQueue.main.asyncAfter(deadline: .now() + timeout) { [weak self] in
+            guard let self else { return }
+            guard isCurrentAttempt(attemptToken) else { return }
+            guard !currentConnectResolved else { return }
+            currentConnectResolved = true
+            vsockStallStreak += 1
+            print(
+                "[control] connect callback stalled after \(Int(timeout.rounded()))s — suspected VZ vsock-helper wedge (stall streak \(vsockStallStreak))"
+            )
+            scheduleReconnect(for: attemptToken, reason: "connect stalled")
         }
     }
 

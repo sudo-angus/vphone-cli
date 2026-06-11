@@ -70,17 +70,29 @@ final class VPhoneTransparentProxy {
         print("[tproxy] helper will auto-detect bridge; Swift is not exporting PF_INTERFACE/LISTEN_ADDR")
 
         let parentPid = ProcessInfo.processInfo.processIdentifier
-        let inner = Self.buildInnerCommand(
-            scriptPath: scriptURL.path,
-            parentPid: parentPid
-        )
+        // When launched by the manager there is no controlling TTY, so an
+        // interactive sudo prompt would hang. The manager sets
+        // VPHONE_SUDO_NONINTERACTIVE=1 and installs a scoped sudoers rule that
+        // makes `sudo -n <script> start` passwordless and keeps WATCH_PID /
+        // REPLACE_EXISTING via env_keep. The legacy boot.sh path (warm sudo
+        // cache, real TTY) keeps the original zsh -c form.
+        let noninteractive = ProcessInfo.processInfo.environment["VPHONE_SUDO_NONINTERACTIVE"] == "1"
 
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
-        // sudo prompts on /dev/tty regardless of stdin, so no need to forward
-        // FileHandle.standardInput here. We do route the helper's stdout/stderr
-        // through pipes so we can prefix or relay them later if needed.
-        p.arguments = ["/bin/zsh", "-c", inner]
+        if noninteractive {
+            p.arguments = ["-n", scriptURL.path, "start"]
+            var env = ProcessInfo.processInfo.environment
+            env["WATCH_PID"] = "\(parentPid)"
+            env["REPLACE_EXISTING"] = "1"
+            p.environment = env
+        } else {
+            // sudo prompts on /dev/tty regardless of stdin, so no need to
+            // forward standard input here. The helper's stdout/stderr are
+            // routed through pipes so we can relay them.
+            let inner = Self.buildInnerCommand(scriptPath: scriptURL.path, parentPid: parentPid)
+            p.arguments = ["/bin/zsh", "-c", inner]
+        }
 
         let outPipe = Pipe()
         let errPipe = Pipe()
@@ -222,7 +234,10 @@ final class VPhoneTransparentProxy {
 
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
-        p.arguments = ["-n", "/bin/zsh", scriptURL.path, "stop"]
+        // Invoke the script directly (not via `/bin/zsh <script>`) so a scoped
+        // NOPASSWD sudoers rule can match `<script> stop`. Works equally with a
+        // warm sudo cache (legacy path) since that authorizes any command.
+        p.arguments = ["-n", scriptURL.path, "stop"]
         let pipe = Pipe()
         p.standardOutput = pipe
         p.standardError = pipe

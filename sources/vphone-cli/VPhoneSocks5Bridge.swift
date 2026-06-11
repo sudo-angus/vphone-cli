@@ -27,6 +27,11 @@ final class VPhoneSocks5Bridge {
     private weak var device: VZVirtioSocketDevice?
     private var listenFd: Int32 = -1
     private var stopped = false
+    /// Set once the guest's vphoned control channel is up *and* post-update, so
+    /// vphoned is actually listening on the guest vsock SOCKS5 ports. Read off
+    /// the accept threads; see `setBackendReady` and the gate in
+    /// `parseAndDispatch`.
+    private let backend = BackendReadyFlag()
 
     init(
         listenHost: String = "127.0.0.1",
@@ -84,6 +89,13 @@ final class VPhoneSocks5Bridge {
         }
     }
 
+    /// Open or close the guest-backend gate. Called from the control channel's
+    /// `onConnect` (ready) / `onDisconnect` (not ready). `nonisolated` because
+    /// it only flips the lock-guarded flag — no main-actor state involved.
+    nonisolated func setBackendReady(_ ready: Bool) {
+        backend.set(ready)
+    }
+
     func stop() {
         stopped = true
         if listenFd >= 0 {
@@ -136,6 +148,22 @@ final class VPhoneSocks5Bridge {
             default: cmdName = "0x\(String(parsed.cmd, radix: 16))"
             }
             print("[socks5] CMD=\(cmdName) atyp=0x\(String(parsed.atyp, radix: 16))")
+
+            // Guest-backend readiness gate — see
+            // research/vsock_helper_wedge_on_burst_econnreset.md. Until vphoned
+            // is up and post-update, the guest has no listener on vsock
+            // 1340/1341. Dispatching `device.connect()` during the iOS boot
+            // window makes every call fail with ECONNRESET; a burst of those
+            // wedges the VZ vsock helper for the rest of the VM's life (control
+            // channel and all guest→host delivery die). The local listener
+            // stays up so clients don't hit ECONNREFUSED backoff — we just
+            // refuse the guest hop with a quick "host unreachable" until ready.
+            if parsed.cmd == 0x01 || parsed.cmd == 0x03, self?.backend.isReady != true {
+                print("[socks5] guest backend not ready; refusing \(cmdName)")
+                Self.sendReply(clientFd, rep: 0x04) // host unreachable
+                Darwin.close(clientFd)
+                return
+            }
 
             switch parsed.cmd {
             case 0x01: // CONNECT
@@ -615,6 +643,24 @@ final class VPhoneSocks5Bridge {
 }
 
 // MARK: - Cross-thread state
+
+/// Guest-backend readiness, flipped by the control channel on the main actor and
+/// read by the SOCKS5 accept threads. Gates whether the bridge is allowed to do
+/// `device.connect()` to the guest's vsock SOCKS5 ports.
+private final class BackendReadyFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var ready = false
+
+    var isReady: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return ready
+    }
+
+    func set(_ value: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        ready = value
+    }
+}
 
 /// Once-fire teardown flag, observed by all three association threads.
 private final class TeardownState: @unchecked Sendable {

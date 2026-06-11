@@ -7,6 +7,7 @@ Virtual iPhone boot tool using Apple's Virtualization.framework with PCC researc
 - **Build:** `make build`
 - **Boot (GUI):** `make boot`
 - **Boot (DFU):** `make boot_dfu`
+- **VM manager GUI:** `make manage` (launch) — or `make install_app` for a one-shot `/Applications/VPhone.app` launcher (Spotlight/Launchpad/Dock); `make uninstall_app` to remove
 - **All targets:** `make help`
 - **Python venv:** `make setup_venv` (installs to `.venv/`, activate with `source .venv/bin/activate`)
 - **Platform:** macOS 15+ (Sequoia), SIP/AMFI disabled

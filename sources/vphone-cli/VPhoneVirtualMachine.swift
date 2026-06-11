@@ -40,6 +40,9 @@ class VPhoneVirtualMachine: NSObject, VZVirtualMachineDelegate {
         var variant: Variant
         var softwareKeyboard: Bool = false
         var noVphoned: Bool
+        /// Human-facing name for the VM window title (manager display name, or
+        /// the VM directory name for a direct `make boot`).
+        var displayName: String?
     }
 
     private struct DeviceIdentity {

@@ -26,6 +26,10 @@ PATCHER_BINARY := .build/debug/vphone-cli
 BUNDLE      := .build/vphone-cli.app
 BUNDLE_BIN  := $(BUNDLE)/Contents/MacOS/vphone-cli
 INFO_PLIST  := sources/Info.plist
+MANAGER_BUNDLE     := .build/VPhone.app
+MANAGER_BUNDLE_BIN := $(MANAGER_BUNDLE)/Contents/MacOS/vphone-cli
+MANAGER_INFO_PLIST := sources/Info-Manager.plist
+APP_INSTALL_PATH   ?= /Applications/VPhone.app
 ENTITLEMENTS := sources/vphone.entitlements
 VENV        := .venv
 TOOLS_PREFIX := .tools
@@ -71,6 +75,11 @@ help:
 	@echo ""
 	@echo "Build:"
 	@echo "  make build                   Build + sign vphone-cli"
+	@echo "  make manage                  Build + launch the VPhone manager GUI (manage/start/stop VMs)"
+	@echo "  make install_app             One-shot: submodules + setup_tools + build + /Applications launcher"
+	@echo "                               (the only command a fresh clone needs for the GUI entry)"
+	@echo "    Options: APP_INSTALL_PATH=/Applications/VPhone.app   Install destination"
+	@echo "  make uninstall_app           Remove the /Applications/VPhone.app symlink"
 	@echo "  make vphoned                 Cross-compile + sign vphoned for iOS"
 	@echo "  make clean                   Remove build/tooling artifacts only"
 	@echo "    Options: CLEAN_VM=1        Also remove VM_DIR=$(VM_DIR) after confirmation"
@@ -249,6 +258,83 @@ bundle: build $(INFO_PLIST)
 	@codesign --force --sign - $(BUNDLE)/Contents/MacOS/ldid
 	@codesign --force --sign - --entitlements $(ENTITLEMENTS) $(BUNDLE_BIN)
 	@echo "  bundled → $(BUNDLE)"
+
+# ── VM manager (GUI) ─────────────────────────────────────────────
+# VPhone.app is the always-on manager. It is signed WITHOUT the private
+# virtualization entitlements so AMFI always lets it launch (so it can start
+# amfidont); it supervises the entitled boot binary from `bundle`.
+.PHONY: manager_app manage
+manager_app: bundle $(MANAGER_INFO_PLIST)
+	@mkdir -p $(MANAGER_BUNDLE)/Contents/MacOS $(MANAGER_BUNDLE)/Contents/Resources
+	@cp -f $(BINARY) $(MANAGER_BUNDLE_BIN)
+	@cp -f $(MANAGER_INFO_PLIST) $(MANAGER_BUNDLE)/Contents/Info.plist
+	@cp -f sources/AppIcon-Manager.icns $(MANAGER_BUNDLE)/Contents/Resources/AppIcon.icns
+	@codesign --force --sign - $(MANAGER_BUNDLE_BIN)
+	@echo "  bundled → $(MANAGER_BUNDLE)"
+
+# Build + launch the manager GUI.
+manage: manager_app
+	"$(CURDIR)/$(MANAGER_BUNDLE_BIN)" manage
+
+# ── /Applications launcher ───────────────────────────────────────
+# `make install_app` is the one-shot, user-facing entry point. On a fresh clone
+# this is the ONLY command a user has to run; it is idempotent end to end:
+#   1. init the vendor SPM submodules so `swift build` can compile,
+#   2. run setup_tools once if host tools are missing (ldid + venv),
+#   3. build + ad-hoc-sign the manager/boot bundles,
+#   4. symlink /Applications/VPhone.app → the build for a Launchpad/Spotlight/
+#      Dock entry.
+# A symlink (not a copy) means every later `make build`/`make manage` is
+# reflected with no re-install; the manager resolves it back to the repo via
+# VPhoneVMRegistry.findRepoRoot, so no path is baked in and the symlink targets
+# $(CURDIR) — each user's install points at their own clone. No sudo
+# (/Applications is admin-group-writable) and no developer account (ad-hoc
+# signing on an AMFI-disabled host). Re-running after a code change skips
+# steps 1–2 and just rebuilds + relinks.
+.PHONY: install_app uninstall_app
+install_app:
+	@command -v swift >/dev/null 2>&1 || { \
+		echo "Error: 'swift' not found — install Xcode Command Line Tools first:"; \
+		echo "       xcode-select --install"; \
+		exit 1; \
+	}
+	@if [ ! -f vendor/Dynamic/Package.swift ]; then \
+		echo "=== Initializing vendor submodules (one-time) ==="; \
+		git submodule update --init --recursive \
+			vendor/Dynamic vendor/swift-argument-parser vendor/MachOKit \
+			vendor/libcapstone-spm vendor/libimg4-spm; \
+	fi
+	@if ! command -v ldid >/dev/null 2>&1 || [ ! -d "$(VENV)" ]; then \
+		command -v brew >/dev/null 2>&1 || { \
+			echo "Error: Homebrew is required for first-time setup. Install it from https://brew.sh and re-run."; \
+			exit 1; \
+		}; \
+		echo "=== Host tools missing — running setup_tools (one-time) ==="; \
+		$(MAKE) setup_tools; \
+	fi
+	@$(MAKE) manager_app
+	@if [ -L "$(APP_INSTALL_PATH)" ]; then rm -f "$(APP_INSTALL_PATH)"; fi
+	@if [ -e "$(APP_INSTALL_PATH)" ]; then \
+		echo "Error: $(APP_INSTALL_PATH) exists and is not a vphone symlink."; \
+		echo "       Remove it manually, then re-run: make install_app"; \
+		exit 1; \
+	fi
+	@ln -s "$(CURDIR)/$(MANAGER_BUNDLE)" "$(APP_INSTALL_PATH)"
+	@/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
+		-f "$(APP_INSTALL_PATH)" >/dev/null 2>&1 || true
+	@echo ""
+	@echo "  installed → $(APP_INSTALL_PATH)  (→ $(CURDIR)/$(MANAGER_BUNDLE))"
+	@echo "  Launch as “VPhone” from Spotlight/Launchpad, or: open -a VPhone"
+
+uninstall_app:
+	@if [ -L "$(APP_INSTALL_PATH)" ]; then \
+		rm -f "$(APP_INSTALL_PATH)"; \
+		echo "  removed $(APP_INSTALL_PATH)"; \
+	elif [ -e "$(APP_INSTALL_PATH)" ]; then \
+		echo "  $(APP_INSTALL_PATH) is not a vphone symlink — left untouched"; \
+	else \
+		echo "  $(APP_INSTALL_PATH) not present — nothing to do"; \
+	fi
 
 # Cross-compile + sign vphoned daemon for iOS arm64 (requires ldid)
 .PHONY: vphoned

@@ -119,7 +119,8 @@ class VPhoneAppDelegate: NSObject, NSApplicationDelegate {
                 screenScale: options.screenScale,
                 keyHelper: keyHelper,
                 control: control,
-                ecid: vm.ecidHex
+                ecid: vm.ecidHex,
+                displayName: options.displayName
             )
             windowController = wc
 
@@ -169,7 +170,11 @@ class VPhoneAppDelegate: NSObject, NSApplicationDelegate {
             hostControl = hc
 
             // Wire location toggle through onConnect/onDisconnect
-            control.onConnect = { [weak mc, weak provider = locationProvider] caps in
+            control.onConnect = { [weak self, weak mc, weak provider = locationProvider] caps in
+                // Open the SOCKS5 guest-backend gate only now that vphoned is up
+                // and post-update — before this, hitting vsock 1340/1341 wedges
+                // the VZ vsock helper (see VPhoneSocks5Bridge).
+                self?.socks5Bridge?.setBackendReady(true)
                 mc?.updateConnectAvailability(available: true)
                 mc?.updateInstallAvailability(available: caps.contains("ipa_install"))
                 mc?.updateAppsAvailability(available: caps.contains("apps"))
@@ -191,7 +196,10 @@ class VPhoneAppDelegate: NSObject, NSApplicationDelegate {
                     await self?.installPackageIfRequested(caps: caps)
                 }
             }
-            control.onDisconnect = { [weak mc, weak provider = locationProvider] in
+            control.onDisconnect = { [weak self, weak mc, weak provider = locationProvider] in
+                // Close the gate: vphoned dropped, so the guest's vsock SOCKS5
+                // listeners are gone until it reconnects.
+                self?.socks5Bridge?.setBackendReady(false)
                 mc?.updateConnectAvailability(available: false)
                 mc?.updateInstallAvailability(available: false)
                 mc?.updateAppsAvailability(available: false)
@@ -204,7 +212,8 @@ class VPhoneAppDelegate: NSObject, NSApplicationDelegate {
             }
         } else if !cli.dfu {
             // Headless mode: auto-start location as before (no menu exists)
-            control.onConnect = { [weak provider = locationProvider] caps in
+            control.onConnect = { [weak self, weak provider = locationProvider] caps in
+                self?.socks5Bridge?.setBackendReady(true)
                 if caps.contains("location") {
                     provider?.startForwarding()
                 } else {
@@ -214,7 +223,8 @@ class VPhoneAppDelegate: NSObject, NSApplicationDelegate {
                     await self?.installPackageIfRequested(caps: caps)
                 }
             }
-            control.onDisconnect = { [weak provider = locationProvider] in
+            control.onDisconnect = { [weak self, weak provider = locationProvider] in
+                self?.socks5Bridge?.setBackendReady(false)
                 provider?.stopReplay()
                 provider?.stopForwarding()
             }
