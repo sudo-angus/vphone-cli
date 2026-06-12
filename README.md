@@ -288,18 +288,23 @@ make install_app   # one-shot: submodules + tools + build + /Applications launch
 
 This is the only command a fresh clone needs for the GUI entry. It is idempotent
 — it initializes the vendor SPM submodules, runs `setup_tools` once if host tools
-are missing (`ldid`, venv), builds and ad-hoc-signs the bundles, then symlinks
-`/Applications/VPhone.app` so the app shows up in Spotlight / Launchpad / Dock.
-No `sudo` (`/Applications` is admin-writable) and no Apple Developer account
-(ad-hoc signing on an AMFI-disabled host). Launch it as **VPhone**, or:
+are missing (`ldid`, venv), builds and ad-hoc-signs the bundles, copies the app
+to `/Applications/VPhone.app`, and indexes it so it shows up in Spotlight /
+Launchpad / Dock. It then offers to launch the app (just press Enter). No `sudo`
+(`/Applications` is admin-writable) and no Apple Developer account (ad-hoc
+signing on an AMFI-disabled host).
 
-```bash
-open -a VPhone
-```
+It installs a real copy, not a symlink — Spotlight and Launchpad skip symlinked
+bundles, so they would never surface in search. The copied manager records this
+clone's path inside the bundle and always spawns the entitled boot binary from
+your live build, so day-to-day `make build` needs no re-install; re-run
+`make install_app` only to refresh the manager binary itself.
 
-The symlink targets your clone's build, so every later `make build` is reflected
-with no re-install. To launch the manager directly without installing the
-launcher, use `make manage`. Remove the launcher with `make uninstall_app`.
+On first launch the window shows a highlighted **Authorize admin** banner —
+click it once to install the scoped sudoers rule, after which VMs can start and
+the AMFI bypass runs without a password. Launch the app as **VPhone**, with
+`open -a VPhone`, or run `make manage` to open the manager without installing the
+launcher. Remove the launcher with `make uninstall_app`.
 
 ## Optional Host TCP Workaround
 

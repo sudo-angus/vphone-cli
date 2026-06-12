@@ -282,15 +282,16 @@ manage: manager_app
 #   1. init the vendor SPM submodules so `swift build` can compile,
 #   2. run setup_tools once if host tools are missing (ldid + venv),
 #   3. build + ad-hoc-sign the manager/boot bundles,
-#   4. symlink /Applications/VPhone.app → the build for a Launchpad/Spotlight/
-#      Dock entry.
-# A symlink (not a copy) means every later `make build`/`make manage` is
-# reflected with no re-install; the manager resolves it back to the repo via
-# VPhoneVMRegistry.findRepoRoot, so no path is baked in and the symlink targets
-# $(CURDIR) — each user's install points at their own clone. No sudo
-# (/Applications is admin-group-writable) and no developer account (ad-hoc
-# signing on an AMFI-disabled host). Re-running after a code change skips
-# steps 1–2 and just rebuilds + relinks.
+#   4. copy the bundle to /Applications/VPhone.app, record this clone's path
+#      inside it, and index it — so it appears in Spotlight/Launchpad/Dock.
+# It installs a real *copy*, not a symlink: Spotlight and Launchpad skip
+# symlinked bundles (they never show up in search), which a symlink can't fix.
+# The copied manager finds this clone via the embedded repo-root resource
+# (VPhoneVMRegistry.findRepoRoot) and always spawns the entitled boot binary from
+# the live build, so day-to-day `make build` needs no re-install; re-run
+# install_app only to refresh the manager binary itself. No sudo (/Applications
+# is admin-group-writable) and no Apple Developer account (ad-hoc signing on an
+# AMFI-disabled host). Finally it offers to launch the app.
 .PHONY: install_app uninstall_app
 install_app:
 	@command -v swift >/dev/null 2>&1 || { \
@@ -313,25 +314,62 @@ install_app:
 		$(MAKE) setup_tools; \
 	fi
 	@$(MAKE) manager_app
-	@if [ -L "$(APP_INSTALL_PATH)" ]; then rm -f "$(APP_INSTALL_PATH)"; fi
-	@if [ -e "$(APP_INSTALL_PATH)" ]; then \
-		echo "Error: $(APP_INSTALL_PATH) exists and is not a vphone symlink."; \
-		echo "       Remove it manually, then re-run: make install_app"; \
-		exit 1; \
+	@if [ -e "$(APP_INSTALL_PATH)" ] && [ ! -L "$(APP_INSTALL_PATH)" ]; then \
+		bid=$$(defaults read "$(APP_INSTALL_PATH)/Contents/Info" CFBundleIdentifier 2>/dev/null || echo ""); \
+		if [ "$$bid" != "com.vphone.manager" ]; then \
+			echo "Error: $(APP_INSTALL_PATH) exists and isn't VPhone (id: $$bid)."; \
+			echo "       Remove it manually, then re-run: make install_app"; \
+			exit 1; \
+		fi; \
 	fi
-	@ln -s "$(CURDIR)/$(MANAGER_BUNDLE)" "$(APP_INSTALL_PATH)"
+	@rm -rf "$(APP_INSTALL_PATH)"
+	@cp -R "$(MANAGER_BUNDLE)" "$(APP_INSTALL_PATH)"
+	@printf '%s' "$(CURDIR)" > "$(APP_INSTALL_PATH)/Contents/Resources/repo-root"
+	@codesign --force --sign - "$(APP_INSTALL_PATH)/Contents/MacOS/vphone-cli" >/dev/null 2>&1 || true
 	@/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
 		-f "$(APP_INSTALL_PATH)" >/dev/null 2>&1 || true
+	@/usr/bin/mdimport "$(APP_INSTALL_PATH)" >/dev/null 2>&1 || true
 	@echo ""
-	@echo "  installed → $(APP_INSTALL_PATH)  (→ $(CURDIR)/$(MANAGER_BUNDLE))"
-	@echo "  Launch as “VPhone” from Spotlight/Launchpad, or: open -a VPhone"
+	@echo "  installed → $(APP_INSTALL_PATH)"
+	@echo "  source clone: $(CURDIR)"
+	@if [ -t 0 ]; then \
+		first=$$(defaults read -g AppleLanguages 2>/dev/null | tr -d ' ",()' | sed '/^$$/d' | head -1); \
+		case "$$first" in zh*) cn=1;; *) cn=0;; esac; \
+		if [ "$$cn" = 1 ]; then printf "\n现在启动 VPhone 吗？[Y/n] "; else printf "\nLaunch VPhone now? [Y/n] "; fi; \
+		read ans; \
+		case "$$ans" in \
+			n|N|no|NO|No) \
+				if [ "$$cn" = 1 ]; then echo "已安装。随时可在 Spotlight / Launchpad 搜索 “VPhone” 启动。"; \
+				else echo "Installed. Launch “VPhone” any time from Spotlight / Launchpad."; fi ;; \
+			*) \
+				open -a VPhone || open "$(APP_INSTALL_PATH)"; \
+				echo ""; \
+				echo "════════════════════════════════════════════════════════════"; \
+				if [ "$$cn" = 1 ]; then \
+					echo "  ⚠  下一步：点击 VPhone 窗口顶部高亮的「Authorize admin」"; \
+					echo "      授权后（安装一次性 sudoers 规则）才能启动 VM。"; \
+				else \
+					echo "  ⚠  Next: click the highlighted “Authorize admin” banner"; \
+					echo "      at the top of the VPhone window before starting a VM."; \
+				fi; \
+				echo "════════════════════════════════════════════════════════════"; ;; \
+		esac; \
+	else \
+		echo "  Launch “VPhone” from Spotlight / Launchpad, or: open -a VPhone"; \
+	fi
 
 uninstall_app:
 	@if [ -L "$(APP_INSTALL_PATH)" ]; then \
 		rm -f "$(APP_INSTALL_PATH)"; \
-		echo "  removed $(APP_INSTALL_PATH)"; \
-	elif [ -e "$(APP_INSTALL_PATH)" ]; then \
-		echo "  $(APP_INSTALL_PATH) is not a vphone symlink — left untouched"; \
+		echo "  removed $(APP_INSTALL_PATH) (symlink)"; \
+	elif [ -d "$(APP_INSTALL_PATH)" ]; then \
+		bid=$$(defaults read "$(APP_INSTALL_PATH)/Contents/Info" CFBundleIdentifier 2>/dev/null || echo ""); \
+		if [ "$$bid" = "com.vphone.manager" ]; then \
+			rm -rf "$(APP_INSTALL_PATH)"; \
+			echo "  removed $(APP_INSTALL_PATH)"; \
+		else \
+			echo "  $(APP_INSTALL_PATH) isn't VPhone (id: $$bid) — left untouched"; \
+		fi; \
 	else \
 		echo "  $(APP_INSTALL_PATH) not present — nothing to do"; \
 	fi

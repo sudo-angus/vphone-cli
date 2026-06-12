@@ -160,6 +160,22 @@ final class VPhoneVMRegistry {
         let marker = "scripts/start_amfidont_for_vphone.sh"
         let makefile = "Makefile"
 
+        func isRepo(_ dir: URL) -> Bool {
+            FileManager.default.fileExists(atPath: dir.appendingPathComponent(marker).path)
+                && FileManager.default.fileExists(atPath: dir.appendingPathComponent(makefile).path)
+        }
+
+        // An installed /Applications/VPhone.app is a *copy* of the build (a real
+        // bundle so Spotlight/Launchpad index it — they skip symlinked apps), so
+        // it can't find the repo by walking up the filesystem. `make install_app`
+        // records the source clone in this resource; trust it while it still looks
+        // like the repo.
+        if let pathURL = Bundle.main.url(forResource: "repo-root", withExtension: nil),
+           let raw = try? String(contentsOf: pathURL, encoding: .utf8) {
+            let dir = URL(fileURLWithPath: raw.trimmingCharacters(in: .whitespacesAndNewlines))
+            if isRepo(dir) { return dir }
+        }
+
         var roots: [URL] = []
         roots.append(
             URL(fileURLWithPath: CommandLine.arguments[0])
@@ -174,13 +190,7 @@ final class VPhoneVMRegistry {
         for root in roots {
             var dir = root
             for _ in 0 ..< 10 {
-                let hasMarker = FileManager.default.fileExists(
-                    atPath: dir.appendingPathComponent(marker).path
-                )
-                let hasMakefile = FileManager.default.fileExists(
-                    atPath: dir.appendingPathComponent(makefile).path
-                )
-                if hasMarker, hasMakefile { return dir }
+                if isRepo(dir) { return dir }
                 let parent = dir.deletingLastPathComponent()
                 if parent.path == dir.path { break }
                 dir = parent

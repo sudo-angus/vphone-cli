@@ -7,6 +7,7 @@ struct VPhoneManagerView: View {
     @State private var showOptions = false
     @State private var createModel: VPhoneCreateModel?
     @State private var pane: DetailPane = .console
+    @State private var authPulse = false
 
     private enum DetailPane: String, CaseIterable, Identifiable {
         case console = "Console"
@@ -15,11 +16,20 @@ struct VPhoneManagerView: View {
     }
 
     var body: some View {
-        HSplitView {
-            sidebar
-                .frame(minWidth: 280, idealWidth: 320, maxWidth: 460)
-            detail
-                .frame(minWidth: 420, maxWidth: .infinity, maxHeight: .infinity)
+        VStack(spacing: 0) {
+            // Until the AMFI bypass is authorized no VM can start, and the small
+            // control at the bottom of the sidebar is easy to miss on first run —
+            // so block the top of the window with an unmissable call to action.
+            if model.authStatus != .authorized {
+                authBanner
+                Divider()
+            }
+            HSplitView {
+                sidebar
+                    .frame(minWidth: 280, idealWidth: 320, maxWidth: 460)
+                detail
+                    .frame(minWidth: 420, maxWidth: .infinity, maxHeight: .infinity)
+            }
         }
         .frame(minWidth: 820, minHeight: 520)
         .toolbar { toolbarContent }
@@ -116,6 +126,49 @@ struct VPhoneManagerView: View {
             parts.append(vm.displaySize)
             return parts.joined(separator: " · ")
         }
+    }
+
+    /// Prominent top-of-window prompt shown until the AMFI bypass is authorized.
+    private var authBanner: some View {
+        HStack(spacing: 11) {
+            Image(systemName: "exclamationmark.shield.fill")
+                .font(.system(size: 17))
+                .foregroundStyle(.white)
+                .opacity(authPulse ? 0.5 : 1)
+                .animation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true), value: authPulse)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(VPhoneL10n.tr("Admin authorization required", "需要管理员授权"))
+                    .font(.system(size: 12.5, weight: .semibold))
+                    .foregroundStyle(.white)
+                Text(VPhoneL10n.tr(
+                    "VMs can only start after you authorize the AMFI bypass (a one-time, scoped sudoers rule).",
+                    "授权 AMFI 绕过后才能启动 VM（一次性、范围受限的 sudoers 规则）。"
+                ))
+                .font(.system(size: 11))
+                .foregroundStyle(.white.opacity(0.92))
+                .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 8)
+            Button {
+                Task { await model.authorize() }
+            } label: {
+                Text(VPhoneL10n.tr("Authorize admin", "授权管理员"))
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Color.orange)
+                    .padding(.horizontal, 13)
+                    .padding(.vertical, 5)
+                    .background(Capsule().fill(Color.white))
+            }
+            .buttonStyle(.plain)
+            .help(VPhoneL10n.tr(
+                "Install a scoped sudoers rule so amfidont and the TCP workaround run without a password",
+                "安装范围受限的 sudoers 规则，让 amfidont 和 TCP workaround 免密运行"
+            ))
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 9)
+        .background(Color.orange.opacity(0.92))
+        .onAppear { authPulse = true }
     }
 
     private var adminBar: some View {
