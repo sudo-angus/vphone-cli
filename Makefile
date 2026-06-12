@@ -122,6 +122,7 @@ help:
 	@echo "  make fw_patch_dev            Patch boot chain with Swift pipeline (dev mode TXM patches)"
 	@echo "  make fw_patch_jb             Patch boot chain with Swift pipeline (dev + JB extensions)"
 	@echo "  make fw_patch_exp            Patch boot chain with Swift pipeline (JB + EXP experimental)"
+	@echo "  make fw_cache_list           List cached firmware in ipsws/ with per-firmware sizes"
 	@echo ""
 	@echo "Restore:"
 	@echo "  make restore_get_shsh        Dump SHSH response from Apple"
@@ -512,6 +513,11 @@ fw_patch_jb: patcher_build
 
 fw_patch_exp: patcher_build
 	"$(CURDIR)/$(PATCHER_BINARY)" patch-firmware --vm-directory "$(CURDIR)/$(VM_DIR)" --variant exp
+
+# Read-only inventory of the firmware cache (ipsws/), with per-firmware sizes.
+.PHONY: fw_cache_list
+fw_cache_list:
+	@zsh "$(CURDIR)/$(SCRIPTS)/fw_cache_list.sh"
 
 # ═══════════════════════════════════════════════════════════════════
 # Restore
