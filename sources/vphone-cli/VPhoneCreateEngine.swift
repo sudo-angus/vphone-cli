@@ -80,6 +80,7 @@ final class VPhoneCreateEngine {
         p.executableURL = URL(fileURLWithPath: "/usr/bin/make")
         p.arguments = args
         p.currentDirectoryURL = repoRoot
+        p.environment = VPhoneToolEnv.environment(repoRoot: repoRoot)
         let pipe = Pipe()
         p.standardOutput = pipe
         p.standardError = pipe

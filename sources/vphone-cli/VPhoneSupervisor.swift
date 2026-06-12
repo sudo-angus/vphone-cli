@@ -109,7 +109,7 @@ final class VPhoneSupervisor {
         process.executableURL = executableURL
         process.arguments = args
         process.currentDirectoryURL = vm.dirURL
-        var env = ProcessInfo.processInfo.environment
+        var env = VPhoneToolEnv.environment(repoRoot: repoRoot)
         // Let the in-child TCP-proxy elevation run passwordless (no TTY here).
         env["VPHONE_SUDO_NONINTERACTIVE"] = "1"
         process.environment = env

@@ -75,6 +75,7 @@ final class VPhoneFirmwareCatalog {
         p.executableURL = URL(fileURLWithPath: "/usr/bin/make")
         p.arguments = ["fw_prepare", "LIST_FIRMWARES=1", "IPHONE_DEVICE=\(device)"]
         p.currentDirectoryURL = repoRoot
+        p.environment = VPhoneToolEnv.environment(repoRoot: repoRoot)
         let out = Pipe()
         p.standardOutput = out
         p.standardError = out
