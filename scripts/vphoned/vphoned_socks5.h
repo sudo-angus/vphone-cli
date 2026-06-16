@@ -20,8 +20,9 @@
 #pragma once
 #import <Foundation/Foundation.h>
 
-#define VPHONED_SOCKS5_PORT     1340  // TCP CONNECT sessions
-#define VPHONED_SOCKS5_UDP_PORT 1341  // UDP relay frame channel
+#define VPHONED_SOCKS5_PORT     1340  // TCP CONNECT sessions (vsock)
+#define VPHONED_SOCKS5_UDP_PORT 1341  // UDP relay frame channel (vsock)
+#define VPHONED_SOCKS5_TCP_PORT 1080  // direct TCP SOCKS5 over the vmnet IP
 
 /// Spawn a detached thread that runs the TCP CONNECT vsock listener.
 /// Returns YES if the listener was bound; NO on socket/bind/listen failure.
@@ -30,3 +31,20 @@ BOOL vp_socks5_start(void);
 /// Spawn a detached thread that runs the UDP relay vsock listener.
 /// Returns YES if the listener was bound; NO on socket/bind/listen failure.
 BOOL vp_socks5_udp_start(void);
+
+/// Spawn a detached thread that runs a *plain TCP/IP* SOCKS5 listener on
+/// `0.0.0.0:port`. This is the direct path: the host (Surge) connects straight
+/// to the guest's vmnet IP, so no vsock and no `VZVirtioSocketDevice.connect()`
+/// is involved — the Apple Virtualization helper (and its connect-churn wedge)
+/// is entirely out of the data path, and the kernel handles concurrency
+/// natively. Sessions reuse the same handler as the vsock path, so domain
+/// resolution and egress (incl. active iOS VPN utun routes) behave identically.
+/// Returns YES if the listener was bound; NO on socket/bind/listen failure.
+BOOL vp_socks5_tcp_start(uint16_t port);
+
+/// Pin a stable IPv4 alias (host octet 250) on the vmnet `en*` interface, so
+/// the host can target a fixed `…/24 .250` address regardless of what the
+/// per-boot DHCP lease assigns. Returns the alias address string on success
+/// (the value to point Surge at), or nil if no vmnet interface was found or the
+/// alias could not be added.
+NSString *vp_socks5_setup_alias(void);

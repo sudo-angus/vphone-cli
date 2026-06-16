@@ -32,6 +32,10 @@ class VPhoneControl {
     private(set) var guestName = ""
     private(set) var guestCaps: [String] = []
     private(set) var guestIP: String?
+    /// "host:port" of the guest's direct TCP SOCKS5 listener (its vmnet IP),
+    /// reported in the hello response. This is the stable endpoint to point a
+    /// proxy client (Surge) at — it bypasses the vsock bridge entirely.
+    private(set) var guestSocks5Endpoint: String?
     /// Path to the signed vphoned binary. When set, enables auto-update.
     var guestBinaryURL: URL?
 
@@ -226,6 +230,7 @@ class VPhoneControl {
             let name = resp["name"] as? String ?? "unknown"
             let caps = resp["caps"] as? [String] ?? []
             let ip = resp["ip"] as? String
+            let socks5 = resp["socks5_tcp"] as? String
             let needUpdate = resp["need_update"] as? Bool ?? false
 
             Task { @MainActor in
@@ -241,10 +246,14 @@ class VPhoneControl {
                 self.guestName = name
                 self.guestCaps = caps
                 self.guestIP = ip
+                self.guestSocks5Endpoint = socks5
                 self.isConnected = true
                 self.vsockStallStreak = 0 // clean connect — helper is healthy
                 let ipSuffix = ip.map { " (\($0))" } ?? ""
                 print("[control] connected to \(name) v\(version)\(ipSuffix), caps: \(caps)")
+                if let socks5 {
+                    print("[socks5] direct SOCKS5 ready at \(socks5) — point Surge here (bypasses the vsock bridge)")
+                }
 
                 if needUpdate && self.variant != .less {
                     self.pushUpdate(fd: fd)
@@ -770,6 +779,7 @@ class VPhoneControl {
         guestName = ""
         guestCaps = []
         guestIP = nil
+        guestSocks5Endpoint = nil
 
         // Fail all pending requests
         failAllPending()

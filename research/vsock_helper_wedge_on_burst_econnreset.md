@@ -182,6 +182,60 @@ reproducer the bridge starts listening *before* the previous helper has
 fully been torn down — or the new helper is hit by the same browser
 burst before vphoned comes up — and we just walk back into the wedge.)
 
+## Structural fix (landed): direct TCP SOCKS5 over the vmnet IP
+
+All of the mitigations below treat the wedge as a hazard to detect and recover
+from. They do not remove it, because the trigger — **one
+`VZVirtioSocketDevice.connect()` per proxied TCP stream** — is inherent to
+routing the proxy through vsock. A browser opening a single page fires dozens of
+concurrent + short-lived connections; that connection *churn* both (a) drives the
+helper toward the port-table corruption above and (b) exhausts the host's GCD
+pump-thread pool (2 blocking `read()` threads per live splice, pool caps ≈ 64),
+which surfaces to the user as Surge `Connection timeout` on busy pages while a
+lone file download stays fast.
+
+The VM uses `VZNATNetworkDeviceAttachment` (shared/NAT). The host therefore
+already sits on the same subnet as the guest — `bridge100` is `192.168.64.1`,
+guests are on `192.168.64.0/24` — which is exactly why `ssh root@…:2222` works.
+So the proxy does not need vsock at all:
+
+- **Guest:** `vp_socks5_tcp_start()` runs the existing SOCKS5 session handler on a
+  plain `AF_INET` listener (`0.0.0.0:1080`). `vp_socks5_setup_alias()` pins a
+  stable `…/24 .250` alias on the vmnet `en*` interface via `SIOCAIFADDR`, so the
+  target address is fixed regardless of the per-boot DHCP lease (the VM's MAC is
+  not persisted, so the DHCP IP changes every boot). The guest advertises
+  `socks5_tcp = "<ip>:1080"` in its hello response.
+- **Host:** `VPhoneControl` parses `socks5_tcp` and prints it on connect. Surge
+  points straight at `192.168.64.250:1080`.
+
+In this path the Apple Virtualization helper and `device.connect()` are **out of
+the data path entirely** — the macOS and iOS kernels carry the connections and
+handle concurrency natively, exactly like any SOCKS5 proxy running on a phone on
+your LAN. No churn reaches the helper, so the wedge cannot be triggered by proxy
+traffic, and there is no Swift pump-thread pool to exhaust. It is also
+observable: SSH in and `netstat`/read logs like any normal daemon.
+
+Scope: this covers both **TCP CONNECT** and **UDP ASSOCIATE** (incl. remote DNS
+via the DOMAIN atyp, which the guest resolves through the active VPN). Because
+the guest now has a client-reachable IP on the shared subnet, UDP ASSOCIATE is a
+standard RFC 1928 §7 relay — `handle_udp_associate_direct` advertises a real
+BND.ADDR/BND.PORT on the vmnet IP, so QUIC/HTTP3/DNS work without the host-side
+framing the vsock path needed (vsock is stream-only, so the guest could not
+expose a UDP port to the host LAN). The client-facing UDP socket binds to the
+exact local IP the client reached, so replies source from the advertised BND
+(strict clients that `connect()` their UDP socket accept them); if iOS rejects
+binding to the alias it falls back to `INADDR_ANY`.
+
+Verified on device (iOS 26, 2026-06-16): static `.250` alias pinned via
+`SIOCAIFADDR`; 200/200 concurrent TCP CONNECT in 13 s with the helper untouched;
+UDP ASSOCIATE round-trips a host-echo datagram and a public DNS query
+(`example.com` via `8.8.8.8`, ANCOUNT=2).
+
+The vsock bridge below is left in place as a fallback; it is simply no longer the
+recommended data path. The vsock UDP relay (`1341`) likewise remains as a
+fallback. Pointing Surge at the guest IP instead of `127.0.0.1:1080` sidesteps
+the entire wedge surface.
+
 ## Mitigation status
 
 Implemented:

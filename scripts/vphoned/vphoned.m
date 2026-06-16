@@ -57,6 +57,9 @@
 
 static BOOL gClipboardAvailable = NO;
 static BOOL gAppsAvailable = NO;
+// "host:port" of the direct TCP SOCKS5 endpoint (vmnet IP), advertised to the
+// host in the hello response so it can tell the user where to point Surge.
+static NSString *gSocks5DirectEndpoint = nil;
 
 #define INSTALL_PATH "/usr/bin/vphoned"
 #define CACHE_PATH "/var/root/Library/Caches/vphoned"
@@ -399,6 +402,8 @@ static BOOL handle_client(int fd) {
     boot_log("handle_client: ip=%s", ip.UTF8String ?: "(nil)");
     if (ip)
       helloResp[@"ip"] = ip;
+    if (gSocks5DirectEndpoint)
+      helloResp[@"socks5_tcp"] = gSocks5DirectEndpoint;
     if (needUpdate)
       helloResp[@"need_update"] = @YES;
 
@@ -583,6 +588,22 @@ int main(int argc, char *argv[]) {
     boot_log("init: vp_socks5_udp_start");
     if (!vp_socks5_udp_start()) {
       NSLog(@"vphoned: SOCKS5 UDP relay disabled (init failed)");
+    }
+
+    // Direct TCP SOCKS5: pin a stable vmnet alias, then listen on it. This is
+    // the robust path — Surge connects straight to the guest IP, so the fragile
+    // vsock connect-per-stream path (and its helper wedge) is out of the data
+    // path. See research/vsock_helper_wedge_on_burst_econnreset.md.
+    boot_log("init: vp_socks5_setup_alias");
+    NSString *aliasIP = vp_socks5_setup_alias();
+    boot_log("init: vp_socks5_tcp_start");
+    if (vp_socks5_tcp_start(VPHONED_SOCKS5_TCP_PORT)) {
+      NSString *epIP = aliasIP ?: primary_ipv4_address();
+      if (epIP)
+        gSocks5DirectEndpoint =
+            [NSString stringWithFormat:@"%@:%d", epIP, VPHONED_SOCKS5_TCP_PORT];
+    } else {
+      NSLog(@"vphoned: direct TCP SOCKS5 disabled (init failed)");
     }
 
     boot_log("vsock: socket()");

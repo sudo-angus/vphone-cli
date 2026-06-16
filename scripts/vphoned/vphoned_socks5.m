@@ -2,6 +2,8 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <ifaddrs.h>
+#include <net/if.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -9,7 +11,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/event.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
+#include <sys/sockio.h>
 #include <sys/types.h>
 #include <sys/uio.h>
 #include <unistd.h>
@@ -158,6 +162,33 @@ static int connect_target(struct addrinfo *res, uint8_t *out_rep) {
   return -1;
 }
 
+// Serves a SOCKS5 UDP ASSOCIATE over the direct (plain-IP) listener. Defined
+// down in the UDP section; the TCP session handler dispatches to it.
+static void handle_udp_associate_direct(int client_fd);
+
+// Read and throw away the request's DST.ADDR/DST.PORT for the given atyp. For
+// UDP ASSOCIATE the client sends a bind hint here (usually 0.0.0.0:0) that the
+// relay does not need; we only have to consume the bytes to stay framed.
+static BOOL read_and_discard_addr(int fd, uint8_t atyp) {
+  uint8_t tmp[256];
+  switch (atyp) {
+  case 0x01: // IPv4 + port
+    return read_fully(fd, tmp, 4) && read_fully(fd, tmp, 2);
+  case 0x04: // IPv6 + port
+    return read_fully(fd, tmp, 16) && read_fully(fd, tmp, 2);
+  case 0x03: { // DOMAIN + port
+    uint8_t len;
+    if (!read_fully(fd, &len, 1))
+      return NO;
+    if (len > 0 && !read_fully(fd, tmp, len))
+      return NO;
+    return read_fully(fd, tmp, 2);
+  }
+  default:
+    return NO;
+  }
+}
+
 static void *handle_session(void *arg) {
   int client = (int)(intptr_t)arg;
 
@@ -193,7 +224,20 @@ static void *handle_session(void *arg) {
   }
   uint8_t cmd = req[1];
   uint8_t atyp = req[3];
-  if (cmd != 0x01) { // CONNECT only
+
+  if (cmd == 0x03) { // UDP ASSOCIATE — served on the direct/plain-IP path only
+    if (!read_and_discard_addr(client, atyp)) {
+      send_reply(client, REP_GENERAL_FAILURE);
+      close(client);
+      return NULL;
+    }
+    // handle_udp_associate_direct rejects non-AF_INET control connections, so a
+    // stray ASSOCIATE on the vsock listener fails cleanly rather than relaying.
+    handle_udp_associate_direct(client);
+    close(client);
+    return NULL;
+  }
+  if (cmd != 0x01) { // otherwise CONNECT only
     send_reply(client, REP_CMD_UNSUPPORTED);
     close(client);
     return NULL;
@@ -363,6 +407,143 @@ BOOL vp_socks5_start(void) {
   return YES;
 }
 
+// MARK: - Direct TCP/IP SOCKS5 (host reaches the guest over its vmnet IP)
+
+// Last octet of the pinned alias. Picked high to stay clear of the low
+// addresses the vmnet DHCP server typically hands out first. With a single VM
+// on the bridge there is no other party that could be assigned this address.
+#define VPHONED_SOCKS5_ALIAS_HOST 250
+
+// Locate the vmnet NAT interface (en*) and its IPv4. The VPN's utun and the
+// cellular pdp_ip* interfaces are deliberately skipped — we want the address on
+// the shared host/guest subnet, not the egress interface.
+static BOOL find_vmnet_iface(char *out_name, size_t name_cap,
+                             struct in_addr *out_addr) {
+  struct ifaddrs *ifap = NULL;
+  if (getifaddrs(&ifap) != 0 || ifap == NULL)
+    return NO;
+  BOOL found = NO;
+  for (struct ifaddrs *cur = ifap; cur != NULL; cur = cur->ifa_next) {
+    if (cur->ifa_addr == NULL || cur->ifa_addr->sa_family != AF_INET)
+      continue;
+    if ((cur->ifa_flags & IFF_UP) == 0 || (cur->ifa_flags & IFF_LOOPBACK) != 0)
+      continue;
+    if (strncmp(cur->ifa_name, "en", 2) != 0)
+      continue;
+    struct sockaddr_in *sin = (struct sockaddr_in *)cur->ifa_addr;
+    strlcpy(out_name, cur->ifa_name, name_cap);
+    *out_addr = sin->sin_addr;
+    found = YES;
+    break;
+  }
+  freeifaddrs(ifap);
+  return found;
+}
+
+NSString *vp_socks5_setup_alias(void) {
+  char ifname[IFNAMSIZ] = {0};
+  struct in_addr base;
+  if (!find_vmnet_iface(ifname, sizeof(ifname), &base)) {
+    NSLog(@"socks5: no vmnet en* interface found; static alias skipped");
+    return nil;
+  }
+
+  // alias = <base /24 network>.250
+  uint32_t base_host = ntohl(base.s_addr);
+  uint32_t alias_host = (base_host & 0xFFFFFF00u) | VPHONED_SOCKS5_ALIAS_HOST;
+  struct in_addr alias_addr;
+  alias_addr.s_addr = htonl(alias_host);
+
+  char alias_str[INET_ADDRSTRLEN] = {0};
+  inet_ntop(AF_INET, &alias_addr, alias_str, sizeof(alias_str));
+
+  // The DHCP primary already landed on .250 — nothing to alias, just use it.
+  if (alias_addr.s_addr == base.s_addr) {
+    NSLog(@"socks5: primary address already %s; no alias needed", alias_str);
+    return [NSString stringWithUTF8String:alias_str];
+  }
+
+  int s = socket(AF_INET, SOCK_DGRAM, 0);
+  if (s < 0) {
+    NSLog(@"socks5: alias socket() failed: %s", strerror(errno));
+    return nil;
+  }
+
+  struct ifaliasreq req;
+  memset(&req, 0, sizeof(req));
+  strlcpy(req.ifra_name, ifname, sizeof(req.ifra_name));
+
+  struct sockaddr_in *addr = (struct sockaddr_in *)&req.ifra_addr;
+  addr->sin_len = sizeof(struct sockaddr_in);
+  addr->sin_family = AF_INET;
+  addr->sin_addr = alias_addr;
+
+  struct sockaddr_in *mask = (struct sockaddr_in *)&req.ifra_mask;
+  mask->sin_len = sizeof(struct sockaddr_in);
+  mask->sin_family = AF_INET;
+  mask->sin_addr.s_addr = htonl(0xFFFFFF00u); // /24
+
+  struct sockaddr_in *bcast = (struct sockaddr_in *)&req.ifra_broadaddr;
+  bcast->sin_len = sizeof(struct sockaddr_in);
+  bcast->sin_family = AF_INET;
+  bcast->sin_addr.s_addr = htonl((base_host & 0xFFFFFF00u) | 0xFF);
+
+  int rc = ioctl(s, SIOCAIFADDR, &req);
+  int saved = errno;
+  close(s);
+  if (rc != 0 && saved != EEXIST) {
+    NSLog(@"socks5: SIOCAIFADDR(%s -> %s) failed: %s", ifname, alias_str,
+          strerror(saved));
+    return nil;
+  }
+  NSLog(@"socks5: static alias %s on %s ready (point Surge here)", alias_str,
+        ifname);
+  return [NSString stringWithUTF8String:alias_str];
+}
+
+BOOL vp_socks5_tcp_start(uint16_t port) {
+  int sock = socket(AF_INET, SOCK_STREAM, 0);
+  if (sock < 0) {
+    NSLog(@"socks5-tcp: socket(AF_INET) failed: %s", strerror(errno));
+    return NO;
+  }
+
+  int one = 1;
+  setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+
+  struct sockaddr_in addr;
+  memset(&addr, 0, sizeof(addr));
+  addr.sin_len = sizeof(addr);
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons(port);
+  addr.sin_addr.s_addr = htonl(INADDR_ANY);
+
+  if (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+    NSLog(@"socks5-tcp: bind 0.0.0.0:%u failed: %s", port, strerror(errno));
+    close(sock);
+    return NO;
+  }
+  // Larger backlog than the vsock path: a browser opening a page fires a burst
+  // of connections, and these now land directly on the kernel accept queue.
+  if (listen(sock, 128) < 0) {
+    NSLog(@"socks5-tcp: listen failed: %s", strerror(errno));
+    close(sock);
+    return NO;
+  }
+
+  pthread_t tid;
+  if (pthread_create(&tid, NULL, listener_thread, (void *)(intptr_t)sock) != 0) {
+    NSLog(@"socks5-tcp: pthread_create(listener) failed: %s", strerror(errno));
+    close(sock);
+    return NO;
+  }
+  pthread_detach(tid);
+
+  NSLog(@"socks5-tcp: listening on 0.0.0.0:%u (direct, bypasses vsock helper)",
+        port);
+  return YES;
+}
+
 // MARK: - UDP relay (SOCKS5 CMD=0x03 UDP ASSOCIATE)
 //
 // Each accepted vsock connection on VPHONED_SOCKS5_UDP_PORT is one UDP
@@ -522,6 +703,214 @@ static size_t udp_encode_source(const struct sockaddr_storage *addr,
     return 7;
   }
   return 0;
+}
+
+// MARK: - Direct SOCKS5 UDP ASSOCIATE (RFC 1928 §7)
+//
+// Unlike the vsock relay above, the client (host Surge) reaches us on our real
+// vmnet IP, so we can advertise a client-reachable BND endpoint on the shared
+// subnet and run a standard UDP relay — no host-side framing. `client_fd` is
+// the TCP control connection; per RFC the association lives exactly as long as
+// it stays open. Two UDP sockets:
+//   cli : bound to our local vmnet IP (the addr the client connected to),
+//         advertised as BND. The client sends SOCKS5-wrapped datagrams here and
+//         receives replies here.
+//   out : dual-stack socket facing targets. v4 targets ride IPv4-mapped v6 so a
+//         single fd covers both families (mirrors handle_udp_session).
+static void handle_udp_associate_direct(int client_fd) {
+  // BND.ADDR = the local address the client reached us on. On the vsock
+  // listener this is AF_VSOCK, not AF_INET — reject so a stray ASSOCIATE there
+  // fails cleanly instead of relaying off a garbage sockaddr.
+  struct sockaddr_in local;
+  socklen_t local_len = sizeof(local);
+  if (getsockname(client_fd, (struct sockaddr *)&local, &local_len) != 0 ||
+      local.sin_family != AF_INET) {
+    NSLog(@"socks5-udp-direct: control conn is not AF_INET; refusing");
+    send_reply(client_fd, REP_CMD_UNSUPPORTED);
+    return;
+  }
+
+  int cli_fd = socket(AF_INET, SOCK_DGRAM, 0);
+  if (cli_fd < 0) {
+    NSLog(@"socks5-udp-direct: client socket failed: %s", strerror(errno));
+    send_reply(client_fd, REP_NET_UNREACHABLE); // diag: 0x03
+    return;
+  }
+  // Prefer binding to the exact local IP the client reached us on, so replies
+  // source from the advertised BND.ADDR (strict clients connect() their UDP
+  // socket to BND and would drop replies from any other source). iOS can reject
+  // binding a DGRAM socket to a secondary alias IP, so fall back to INADDR_ANY.
+  struct sockaddr_in bind_addr = local;
+  bind_addr.sin_port = 0; // ephemeral
+  if (bind(cli_fd, (struct sockaddr *)&bind_addr, sizeof(bind_addr)) < 0) {
+    NSLog(@"socks5-udp-direct: bind to %s failed (%s); retrying INADDR_ANY",
+          inet_ntoa(local.sin_addr), strerror(errno));
+    struct sockaddr_in any;
+    memset(&any, 0, sizeof(any));
+    any.sin_len = sizeof(any);
+    any.sin_family = AF_INET;
+    any.sin_addr.s_addr = htonl(INADDR_ANY);
+    if (bind(cli_fd, (struct sockaddr *)&any, sizeof(any)) < 0) {
+      NSLog(@"socks5-udp-direct: client bind failed: %s", strerror(errno));
+      close(cli_fd);
+      send_reply(client_fd, REP_HOST_UNREACHABLE); // diag: 0x04
+      return;
+    }
+  }
+  struct sockaddr_in bound;
+  socklen_t bound_len = sizeof(bound);
+  getsockname(cli_fd, (struct sockaddr *)&bound, &bound_len);
+
+  int out_fd = socket(AF_INET6, SOCK_DGRAM, 0);
+  if (out_fd < 0) {
+    NSLog(@"socks5-udp-direct: out socket failed: %s", strerror(errno));
+    close(cli_fd);
+    send_reply(client_fd, REP_CONN_REFUSED); // diag: 0x05
+    return;
+  }
+  int zero = 0;
+  setsockopt(out_fd, IPPROTO_IPV6, IPV6_V6ONLY, &zero, sizeof(zero));
+  struct sockaddr_in6 out_bind;
+  memset(&out_bind, 0, sizeof(out_bind));
+  out_bind.sin6_len = sizeof(out_bind);
+  out_bind.sin6_family = AF_INET6;
+  if (bind(out_fd, (struct sockaddr *)&out_bind, sizeof(out_bind)) < 0) {
+    NSLog(@"socks5-udp-direct: out bind failed: %s", strerror(errno));
+    close(cli_fd);
+    close(out_fd);
+    send_reply(client_fd, REP_TTL_EXPIRED); // diag: 0x06
+    return;
+  }
+
+  // Reply: ATYP IPv4, BND.ADDR = local IP, BND.PORT = cli ephemeral port.
+  uint8_t reply[10];
+  reply[0] = 0x05;
+  reply[1] = REP_SUCCESS;
+  reply[2] = 0x00;
+  reply[3] = 0x01;
+  memcpy(&reply[4], &local.sin_addr, 4);
+  memcpy(&reply[8], &bound.sin_port, 2);
+  if (!write_fully(client_fd, reply, sizeof(reply))) {
+    close(cli_fd);
+    close(out_fd);
+    return;
+  }
+  NSLog(@"socks5-udp-direct: association up, BND %s:%u",
+        inet_ntoa(local.sin_addr), ntohs(bound.sin_port));
+
+  int kq = kqueue();
+  if (kq < 0) {
+    close(cli_fd);
+    close(out_fd);
+    return;
+  }
+  struct kevent changes[3];
+  EV_SET(&changes[0], client_fd, EVFILT_READ, EV_ADD, 0, 0, NULL);
+  EV_SET(&changes[1], cli_fd, EVFILT_READ, EV_ADD, 0, 0, NULL);
+  EV_SET(&changes[2], out_fd, EVFILT_READ, EV_ADD, 0, 0, NULL);
+  if (kevent(kq, changes, 3, NULL, 0, NULL) < 0) {
+    NSLog(@"socks5-udp-direct: kevent register failed: %s", strerror(errno));
+    close(kq);
+    close(cli_fd);
+    close(out_fd);
+    return;
+  }
+
+  struct sockaddr_in client_src; // latched on first client datagram
+  int have_client_src = 0;
+  uint8_t pkt[65535];
+
+  for (;;) {
+    struct kevent ev;
+    int n = kevent(kq, NULL, 0, &ev, 1, NULL);
+    if (n < 0) {
+      if (errno == EINTR)
+        continue;
+      break;
+    }
+    if (n == 0)
+      continue;
+
+    if ((int)ev.ident == client_fd) {
+      // Any traffic or EOF on the TCP control channel ends the association.
+      break;
+    } else if ((int)ev.ident == cli_fd) {
+      // Client → target. Datagram = [RSV 2][FRAG 1][atyp][addr][port][payload].
+      struct sockaddr_in src;
+      socklen_t src_len = sizeof(src);
+      ssize_t r = recvfrom(cli_fd, pkt, sizeof(pkt), 0,
+                           (struct sockaddr *)&src, &src_len);
+      if (r < 0) {
+        if (errno == EINTR)
+          continue;
+        break;
+      }
+      if (r < 3 || pkt[0] != 0x00 || pkt[1] != 0x00)
+        continue;
+      if (pkt[2] != 0x00) // FRAG unsupported per RFC
+        continue;
+      client_src = src;
+      have_client_src = 1;
+
+      struct sockaddr_storage target;
+      socklen_t target_len = 0;
+      int is_domain = 0;
+      char domain[256];
+      uint16_t port_host = 0;
+      int hdr_len = udp_decode_addr(pkt + 3, (size_t)r - 3, &target,
+                                    &target_len, &is_domain, domain,
+                                    sizeof(domain), &port_host);
+      if (hdr_len <= 0)
+        continue;
+      if (is_domain) {
+        if (udp_resolve_domain(domain, port_host, &target, &target_len) != 0) {
+          NSLog(@"socks5-udp-direct: getaddrinfo(%s) failed", domain);
+          continue;
+        }
+      }
+      const uint8_t *payload = pkt + 3 + hdr_len;
+      size_t payload_len = (size_t)r - 3 - (size_t)hdr_len;
+      if (sendto(out_fd, payload, payload_len, 0, (struct sockaddr *)&target,
+                 target_len) < 0) {
+        // Per-datagram failures (route down) are normal; keep the association.
+        NSLog(@"socks5-udp-direct: sendto failed: %s", strerror(errno));
+      }
+    } else if ((int)ev.ident == out_fd) {
+      // Target → client. Wrap reply source in a SOCKS5 UDP header.
+      struct sockaddr_storage rsrc;
+      socklen_t rsrc_len = sizeof(rsrc);
+      ssize_t r = recvfrom(out_fd, pkt, sizeof(pkt), 0,
+                           (struct sockaddr *)&rsrc, &rsrc_len);
+      if (r < 0) {
+        if (errno == EINTR)
+          continue;
+        break;
+      }
+      if (!have_client_src)
+        continue; // no client to reply to yet
+
+      uint8_t hdr[19];
+      size_t hl = udp_encode_source(&rsrc, hdr);
+      if (hl == 0)
+        continue;
+      // out = [0,0,0] (RSV,RSV,FRAG) + [atyp][addr][port] + payload.
+      uint8_t out[3 + 19 + 65535];
+      out[0] = 0x00;
+      out[1] = 0x00;
+      out[2] = 0x00;
+      memcpy(out + 3, hdr, hl);
+      memcpy(out + 3 + hl, pkt, (size_t)r);
+      sendto(cli_fd, out, 3 + hl + (size_t)r, 0,
+             (struct sockaddr *)&client_src, sizeof(client_src));
+    }
+
+    if (ev.flags & EV_EOF && (int)ev.ident == client_fd)
+      break;
+  }
+
+  close(kq);
+  close(cli_fd);
+  close(out_fd);
 }
 
 static void handle_udp_session(int vsock_fd) {
