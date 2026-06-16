@@ -10,11 +10,16 @@ import Foundation
 final class VPhoneUSBMuxForwarder {
     private let listenHost: String
     private let listenPort: UInt16
-    private let targetPort: UInt16
+    let targetPort: UInt16
     private let targetUDID: String?
     private let targetECID: String?
     private let usbmuxPath: String
     private var listenFd: Int32 = -1
+
+    /// True once `start()` has bound and is accepting. Read by the host app's
+    /// health responder so the manager can report forward state without probing
+    /// the port (a probe `connect()` would open a real guest connection).
+    var isListening: Bool { listenFd >= 0 }
 
     init(
         listenHost: String = "127.0.0.1",

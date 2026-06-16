@@ -36,6 +36,12 @@ struct VPhoneNetworkStatus: Sendable {
     var tcpWorkaroundActive = false
     /// SOCKS5 bridge listening on its port; nil when SOCKS5 isn't configured.
     var socks5Listening: Bool?
+    /// The guest's direct TCP SOCKS5 endpoint ("192.168.64.250:1080"), reported
+    /// over the control channel. This is the address to point Surge at — it
+    /// bypasses the host vsock bridge. nil until the guest reports it.
+    var socks5Endpoint: String?
+    /// Guest's primary IPv4 (vmnet), reported over the control channel.
+    var guestIP: String?
     /// usbmux SSH forward (local → guest 22222) accepting connections.
     var sshListening = false
     /// usbmux RPC forward (local → guest 5910) accepting connections.

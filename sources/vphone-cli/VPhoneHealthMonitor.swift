@@ -15,9 +15,21 @@ import Foundation
 /// (screenshot diffing) deliberately left for later.
 @MainActor
 final class VPhoneHealthMonitor {
+    /// Host-side network plumbing state, carried in the `health` reply so we
+    /// never probe ports (a probe `connect()` opened a real guest connection on
+    /// every tick and spammed the network log). Optionals are nil when the field
+    /// is absent — e.g. an adopted VM whose binary predates this reply.
+    private struct HealthNet: Sendable {
+        var sshListening: Bool?
+        var rpcListening: Bool?
+        var socks5Listening: Bool?
+        var socks5Endpoint: String?
+        var guestIP: String?
+    }
+
     private enum Probe: Sendable {
         case notUp
-        case responded(connected: Bool, caps: [String], stall: Int)
+        case responded(connected: Bool, caps: [String], stall: Int, net: HealthNet)
         case timeout
     }
 
@@ -71,7 +83,7 @@ final class VPhoneHealthMonitor {
     private struct TickResult: Sendable {
         let id: String
         let health: Probe
-        let net: VPhoneNetworkStatus
+        let tproxyActive: Bool
     }
 
     private func tick() async {
@@ -79,18 +91,19 @@ final class VPhoneHealthMonitor {
         let active = vms.filter { $0.runState.isActive }
         guard !active.isEmpty else { return }
 
-        // Probe heartbeat + network for all VMs concurrently off the main actor.
+        // Probe heartbeat for all VMs concurrently off the main actor. Listener
+        // state rides the health reply; only the tproxy relay still needs its own
+        // check (a pgrep, which produces no network-log noise).
         let results: [TickResult] = await withTaskGroup(of: TickResult.self) { group in
             for vm in active {
                 let id = vm.id
                 let path = vm.controlSocketURL.path
-                let ssh = vm.sshPort, rpc = vm.rpcPort
-                let socks5 = vm.socks5Port, usingTCP = vm.usingTCPWorkaround
+                let usingTCP = vm.usingTCPWorkaround
                 group.addTask {
                     TickResult(
                         id: id,
                         health: Self.probe(socketPath: path),
-                        net: Self.netProbe(ssh: ssh, rpc: rpc, socks5: socks5, usingTCP: usingTCP)
+                        tproxyActive: usingTCP && VPhoneSupervisor.tproxyRelayRunning()
                     )
                 }
             }
@@ -103,25 +116,27 @@ final class VPhoneHealthMonitor {
         for r in results {
             guard let vm = byID[r.id] else { continue }
             apply(r.health, to: vm)
-            if vm.runState.isActive { vm.network = r.net }
-        }
-    }
+            guard vm.runState.isActive else { continue }
 
-    private nonisolated static func netProbe(ssh: Int?, rpc: Int?, socks5: Int, usingTCP: Bool) -> VPhoneNetworkStatus {
-        var s = VPhoneNetworkStatus()
-        if let ssh { s.sshListening = VPhoneSupervisor.tcpPortListening(port: ssh) }
-        if let rpc { s.rpcListening = VPhoneSupervisor.tcpPortListening(port: rpc) }
-        s.socks5Listening = socks5 > 0 ? VPhoneSupervisor.tcpPortListening(port: socks5) : nil
-        s.tcpWorkaroundActive = usingTCP && VPhoneSupervisor.tproxyRelayRunning()
-        s.checkedAt = Date()
-        return s
+            var s = VPhoneNetworkStatus()
+            s.checkedAt = Date()
+            s.tcpWorkaroundActive = r.tproxyActive
+            if case let .responded(_, _, _, net) = r.health {
+                s.sshListening = net.sshListening ?? false
+                s.rpcListening = net.rpcListening ?? false
+                s.socks5Listening = net.socks5Listening
+                s.socks5Endpoint = net.socks5Endpoint
+                s.guestIP = net.guestIP
+            }
+            vm.network = s
+        }
     }
 
     private func apply(_ probe: Probe, to vm: VPhoneManagedVM) {
         guard vm.runState.isActive else { return }
 
         switch probe {
-        case let .responded(connected, caps, stall):
+        case let .responded(connected, caps, stall, _):
             if connected {
                 streak[vm.id] = 0
                 guestDownStreak[vm.id] = 0
@@ -252,6 +267,12 @@ final class VPhoneHealthMonitor {
         // Absent on binaries predating the wedge-stall signal — treat as 0
         // (no fingerprint), so they fall back to the slow guest-down path.
         let stall = json["vsock_stall"] as? Int ?? 0
-        return .responded(connected: connectedFlag, caps: caps, stall: stall)
+        var net = HealthNet()
+        net.sshListening = json["ssh_listening"] as? Bool
+        net.rpcListening = json["rpc_listening"] as? Bool
+        net.socks5Listening = json["socks5_listening"] as? Bool
+        net.socks5Endpoint = json["socks5_endpoint"] as? String
+        net.guestIP = json["guest_ip"] as? String
+        return .responded(connected: connectedFlag, caps: caps, stall: stall, net: net)
     }
 }

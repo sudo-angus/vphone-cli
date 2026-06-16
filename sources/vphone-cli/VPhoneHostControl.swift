@@ -37,6 +37,15 @@ class VPhoneHostControl {
     private var screenRecorder: VPhoneScreenRecorder?
     private weak var control: VPhoneControl?
 
+    /// Supplies live host-side network plumbing state (listener flags, guest
+    /// SOCKS5 endpoint) merged into the `health` reply. Set by the app delegate
+    /// once forwarders/bridge/control exist; read on the main actor. Letting the
+    /// host app introspect its own listeners means the manager never has to
+    /// probe ports with a `connect()` — which used to spam the network log with
+    /// `[usbmux] connection established` and `[socks5] handshake parse failed`
+    /// on every 3 s health tick.
+    var networkInfoProvider: (@MainActor () -> [String: Any])?
+
     /// Thread-safe box for passing results between main actor and accept queue.
     private final class ResultBox: @unchecked Sendable {
         var path: String?
@@ -426,7 +435,7 @@ class VPhoneHostControl {
             let box = ResponseBox()
             Task { @MainActor in
                 defer { semaphore.signal() }
-                box.response = [
+                var resp: [String: Any] = [
                     "ok": true,
                     "connected": controller?.control?.isConnected ?? false,
                     "caps": controller?.control?.guestCaps ?? [],
@@ -435,6 +444,12 @@ class VPhoneHostControl {
                     // a wedged VZ helper climbs it. Lets the manager recover fast.
                     "vsock_stall": controller?.control?.vsockStallStreak ?? 0,
                 ]
+                // Listener flags + guest SOCKS5 endpoint, so the manager renders
+                // network status without probing ports (see networkInfoProvider).
+                if let info = controller?.networkInfoProvider?() {
+                    resp.merge(info) { _, new in new }
+                }
+                box.response = resp
             }
             semaphore.wait()
             writeJSONResponse(fd, box.response)

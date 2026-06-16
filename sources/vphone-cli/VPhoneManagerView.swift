@@ -440,8 +440,15 @@ struct VPhoneManagerView: View {
     private func socks5Status(_ vm: VPhoneManagedVM) -> NetStatus {
         guard vm.socks5Port > 0 else { return NetStatus(color: .gray, text: "off") }
         guard vm.runState.isActive else { return NetStatus(color: .gray, text: "off") }
+        // The guest's direct TCP SOCKS5 endpoint is the address to point Surge
+        // at — it bypasses the host vsock bridge (and its concurrency wedge).
+        // Show it once the guest reports it; the local bridge stays up as a
+        // fallback. Until then, fall back to the local bridge address.
+        if let endpoint = vm.network.socks5Endpoint {
+            return NetStatus(color: .green, text: "\(endpoint)  (direct)")
+        }
         return vm.network.socks5Listening == true
-            ? NetStatus(color: .green, text: "127.0.0.1:\(vm.socks5Port)")
+            ? NetStatus(color: .green, text: "127.0.0.1:\(vm.socks5Port)  (bridge)")
             : NetStatus(color: .orange, text: "starting (:\(vm.socks5Port))")
     }
 

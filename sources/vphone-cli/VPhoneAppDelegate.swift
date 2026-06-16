@@ -169,6 +169,31 @@ class VPhoneAppDelegate: NSObject, NSApplicationDelegate {
             )
             hostControl = hc
 
+            // Let the health reply carry host-side network state so the manager
+            // never probes ports (which opened real guest connections / tripped
+            // SOCKS5 parse errors every tick). Read on the main actor at reply time.
+            hc.networkInfoProvider = { [weak self] in
+                guard let self else { return [:] }
+                var info: [String: Any] = [:]
+                if let bridge = self.socks5Bridge {
+                    info["socks5_listening"] = bridge.isListening
+                }
+                for forwarder in self.usbmuxForwarders {
+                    switch forwarder.targetPort {
+                    case 22222: info["ssh_listening"] = forwarder.isListening
+                    case 5910: info["rpc_listening"] = forwarder.isListening
+                    default: break
+                    }
+                }
+                if let endpoint = self.control?.guestSocks5Endpoint {
+                    info["socks5_endpoint"] = endpoint
+                }
+                if let ip = self.control?.guestIP {
+                    info["guest_ip"] = ip
+                }
+                return info
+            }
+
             // Wire location toggle through onConnect/onDisconnect
             control.onConnect = { [weak self, weak mc, weak provider = locationProvider] caps in
                 // Open the SOCKS5 guest-backend gate only now that vphoned is up

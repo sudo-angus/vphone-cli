@@ -27,6 +27,11 @@ final class VPhoneSocks5Bridge {
     private weak var device: VZVirtioSocketDevice?
     private var listenFd: Int32 = -1
     private var stopped = false
+
+    /// True once the local listener is bound. Read by the host app's health
+    /// responder so the manager reports SOCKS5 state without a probe `connect()`
+    /// (which would trip `handshake parse failed` on every health tick).
+    var isListening: Bool { listenFd >= 0 }
     /// Set once the guest's vphoned control channel is up *and* post-update, so
     /// vphoned is actually listening on the guest vsock SOCKS5 ports. Read off
     /// the accept threads; see `setBackendReady` and the gate in
