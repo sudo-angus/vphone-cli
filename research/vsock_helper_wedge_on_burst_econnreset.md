@@ -236,6 +236,35 @@ recommended data path. The vsock UDP relay (`1341`) likewise remains as a
 fallback. Pointing Surge at the guest IP instead of `127.0.0.1:1080` sidesteps
 the entire wedge surface.
 
+### Follow-up fix (2026-06-16): guest TCP relay no longer rides GCD
+
+Moving the data path into the guest surfaced a second, independent
+pool-exhaustion bug — this time inside `vphoned` itself, not the host. The TCP
+relay `splice_loop()` dispatched **two blocking-`read()` byte pumps per
+connection onto the GCD global concurrent queue**. A half-open or idle
+connection (routine once a browser fires dozens of parallel requests, and
+guaranteed when the in-guest VPN drops a flow mid-stream) parks both pumps on
+`read()` forever, each holding a GCD worker. Under page-level concurrency the
+pool saturates and never recovers: the per-connection **pthread** still runs the
+SOCKS5 greeting + CONNECT (so the client gets `rep=0`, "granted"), but the relay
+that GCD was supposed to run never schedules, so **zero application bytes move**.
+That is exactly the user-visible failure — Surge connects to `…:1080`, the
+handshake succeeds, then the stream half-closes at 60 s and times out at 120 s —
+and it does not clear until the daemon restarts.
+
+Decisive isolation (host-side, no VPN involved): a SOCKS5 CONNECT to the guest's
+*own* sshd (`127.0.0.1:22222`) returned `rep=0` in 4 ms but never delivered the
+banner sshd sends immediately. Same `0 bytes` for public and internal targets
+alike → the relay, not routing.
+
+Fix: `splice_loop()` is now a single **non-blocking `poll()` loop on the
+caller's per-connection pthread** — no GCD queue, so there is no shared pool to
+exhaust. It applies real backpressure (stops reading a source while its 64 KiB
+buffer is unflushed), half-closes each direction on EOF, sets `SO_KEEPALIVE`, and
+reaps a silent link after a 10-minute idle ceiling so a leaked connection can no
+longer pin its thread. One pthread per connection was already the model for the
+greeting/CONNECT phase; the relay just stops spawning the extra GCD work.
+
 ## Mitigation status
 
 Implemented:

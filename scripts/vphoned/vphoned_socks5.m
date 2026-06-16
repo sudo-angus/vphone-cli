@@ -2,11 +2,13 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <ifaddrs.h>
 #include <net/if.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <poll.h>
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
@@ -105,42 +107,116 @@ static uint8_t errno_to_rep(int e) {
 
 // MARK: - Pipe loop
 
+// Relay bytes between the SOCKS client and the target until both sides close or
+// the link goes idle. Runs entirely on the caller's per-connection pthread —
+// deliberately NOT on a GCD queue. The previous design dispatched two
+// blocking-read() pumps onto the global concurrent queue; a browser firing
+// dozens of parallel requests leaves many half-open/idle connections whose
+// pumps park on read() forever, each holding a GCD worker thread. The shared
+// pool saturates and every later relay starves — connect still succeeds (it
+// runs on the pthread) but no bytes ever move, and nothing recovers short of
+// restarting the daemon. A single non-blocking poll() loop per connection has
+// no shared pool to exhaust, applies real backpressure between the two sides,
+// and reaps a dead/idle link via the poll timeout.
 static void splice_loop(int a, int b) {
-  // Two-thread byte pump: one direction per thread. Simpler than poll() and
-  // the per-connection thread cost is negligible here.
-  __block int ab_done = 0;
-  __block int ba_done = 0;
+  int fds[2] = {a, b};
+  for (int i = 0; i < 2; i++) {
+    int fl = fcntl(fds[i], F_GETFL, 0);
+    if (fl >= 0)
+      fcntl(fds[i], F_SETFL, fl | O_NONBLOCK);
+    int one = 1;
+    setsockopt(fds[i], SOL_SOCKET, SO_KEEPALIVE, &one, sizeof(one));
+  }
 
-  dispatch_queue_t q =
-      dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0);
-  dispatch_semaphore_t done = dispatch_semaphore_create(0);
-
-  void (^pump)(int, int, int *) = ^(int from, int to, int *flag) {
-    uint8_t buf[16384];
-    while (1) {
-      ssize_t n = read(from, buf, sizeof(buf));
-      if (n <= 0)
-        break;
-      if (!write_fully(to, buf, (size_t)n))
-        break;
-    }
-    // Half-close the write side of the peer so the other direction can drain
-    // cleanly when one side finishes.
-    shutdown(to, SHUT_WR);
-    *flag = 1;
-    dispatch_semaphore_signal(done);
+  // One pending buffer per direction: dir 0 = a->b, dir 1 = b->a. When a buffer
+  // holds unwritten bytes we stop reading that source (backpressure) until the
+  // peer drains it.
+  struct relay_dir {
+    int from;
+    int to;
+    uint8_t buf[65536];
+    size_t len; // bytes buffered
+    size_t off; // bytes already written from buf
+    int read_eof;
+    int done;
+  } d[2] = {
+      {.from = a, .to = b},
+      {.from = b, .to = a},
   };
 
-  dispatch_async(q, ^{
-    pump(a, b, &ab_done);
-  });
-  dispatch_async(q, ^{
-    pump(b, a, &ba_done);
-  });
+  // Ceiling for a silent link. SO_KEEPALIVE catches a peer that vanishes; this
+  // backstops the case where neither side ever sends or FINs, so a leaked
+  // connection can't pin the thread forever the way the old pumps did.
+  const int idle_ms = 10 * 60 * 1000;
 
-  // Wait for both directions.
-  dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
-  dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
+  while (!(d[0].done && d[1].done)) {
+    struct pollfd pf[2] = {{.fd = a, .events = 0}, {.fd = b, .events = 0}};
+    for (int i = 0; i < 2; i++) {
+      if (!d[i].read_eof && d[i].len == 0)
+        (d[i].from == a ? &pf[0] : &pf[1])->events |= POLLIN;
+      if (d[i].len > d[i].off)
+        (d[i].to == a ? &pf[0] : &pf[1])->events |= POLLOUT;
+    }
+    if (pf[0].events == 0 && pf[1].events == 0)
+      break;
+
+    int n = poll(pf, 2, idle_ms);
+    if (n < 0) {
+      if (errno == EINTR)
+        continue;
+      break;
+    }
+    if (n == 0)
+      break; // idle timeout — reap
+
+#define REVENTS(fd) ((fd) == a ? pf[0].revents : pf[1].revents)
+    for (int i = 0; i < 2; i++) {
+      // Flush buffered bytes toward the peer if it can take them.
+      if (d[i].len > d[i].off &&
+          (REVENTS(d[i].to) & (POLLOUT | POLLERR | POLLHUP))) {
+        ssize_t w = write(d[i].to, d[i].buf + d[i].off, d[i].len - d[i].off);
+        if (w > 0) {
+          d[i].off += (size_t)w;
+          if (d[i].off == d[i].len)
+            d[i].len = d[i].off = 0;
+        } else if (w < 0 && errno != EAGAIN && errno != EINTR) {
+          d[i].read_eof = 1;
+          d[i].len = d[i].off = 0;
+        }
+      }
+      // Pull from the source only when its buffer is empty.
+      if (!d[i].read_eof && d[i].len == 0 &&
+          (REVENTS(d[i].from) & (POLLIN | POLLERR | POLLHUP))) {
+        ssize_t r = read(d[i].from, d[i].buf, sizeof(d[i].buf));
+        if (r > 0) {
+          d[i].len = (size_t)r;
+          d[i].off = 0;
+          // Opportunistic write keeps latency low; EAGAIN just defers to poll.
+          ssize_t w = write(d[i].to, d[i].buf, d[i].len);
+          if (w > 0) {
+            d[i].off = (size_t)w;
+            if (d[i].off == d[i].len)
+              d[i].len = d[i].off = 0;
+          } else if (w < 0 && errno != EAGAIN && errno != EINTR) {
+            d[i].read_eof = 1;
+            d[i].len = d[i].off = 0;
+          }
+        } else if (r == 0) {
+          d[i].read_eof = 1;
+        } else if (errno != EAGAIN && errno != EINTR) {
+          d[i].read_eof = 1;
+          d[i].len = d[i].off = 0;
+        }
+      }
+      // Source drained and at EOF: half-close the peer's write side so it sees
+      // the FIN, then mark this direction finished.
+      if (d[i].read_eof && d[i].len == 0 && !d[i].done) {
+        shutdown(d[i].to, SHUT_WR);
+        d[i].done = 1;
+      }
+    }
+#undef REVENTS
+  }
 }
 
 // MARK: - SOCKS5 session
