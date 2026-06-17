@@ -130,18 +130,43 @@ final class VPhonePrivilege {
 
     // MARK: - amfidont
 
-    /// Ensure the AMFI bypass daemon is up. Passwordless once authorized.
+    /// Ensure the AMFI bypass is up *and* self-healing. Passwordless once
+    /// authorized.
+    ///
+    /// amfid is launchd-recycled periodically; when it is, amfidont's lldb
+    /// session dies (`Unexpected process state 10`) and the worker exits,
+    /// silently dropping the bypass. `amfidont_supervisor.sh` watches for that
+    /// and relaunches the worker, so the durable goal is "a supervisor is
+    /// running", not "a worker exists right now".
     func ensureAmfidont() async -> AmfidontResult {
         let repoPath = repoRoot.path
-        if Self.isAmfidontRunning(repoPath: repoPath) { return .running }
+        // Supervisor already minding the worker — nothing to do.
+        if Self.isSupervisorRunning(repoPath: repoPath) { return .running }
         guard let python = resolveAmfidontPython() else { return .unavailable }
         return await Task.detached {
-            Self.startAmfidont(python: python, repoPath: repoPath)
+            // A worker is already up (manual/legacy daemon, no supervisor):
+            // attach a supervisor to keep it alive, don't double-start.
+            if Self.isWorkerRunning(repoPath: repoPath) {
+                Self.startSupervisor(python: python, repoPath: repoPath)
+                return .running
+            }
+            // Cold start: launch once directly so a real authorization or
+            // availability problem surfaces synchronously, then hand off to the
+            // supervisor for the recurring amfid-recycle recovery.
+            let first = Self.startAmfidont(python: python, repoPath: repoPath)
+            switch first {
+            case .started, .running:
+                Self.startSupervisor(python: python, repoPath: repoPath)
+                return .started
+            case .needsAuthorization, .unavailable, .failed:
+                return first
+            }
         }.value
     }
 
     func isAmfidontRunning() -> Bool {
-        Self.isAmfidontRunning(repoPath: repoRoot.path)
+        let repoPath = repoRoot.path
+        return Self.isSupervisorRunning(repoPath: repoPath) || Self.isWorkerRunning(repoPath: repoPath)
     }
 
     // MARK: - python resolution
@@ -167,12 +192,44 @@ final class VPhonePrivilege {
 
     // MARK: - nonisolated helpers
 
-    nonisolated private static func isAmfidontRunning(repoPath: String) -> Bool {
+    /// Processes whose argv mentions amfidont *and* our repo path. The transient
+    /// `python -c import amfidont` probe also matches "amfidont", so the repo
+    /// path is what isolates our own processes.
+    nonisolated private static func amfidontLines(repoPath: String) -> [String] {
         let (rc, out) = runCapture("/usr/bin/pgrep", ["-fl", "amfidont"])
-        guard rc == 0 else { return false }
-        // The transient `python -c import amfidont` probe also matches "amfidont";
-        // the live daemon is the one carrying our --path.
-        return out.split(separator: "\n").contains { $0.contains(repoPath) }
+        guard rc == 0 else { return [] }
+        return out.split(separator: "\n").map(String.init).filter { $0.contains(repoPath) }
+    }
+
+    nonisolated private static func isSupervisorRunning(repoPath: String) -> Bool {
+        amfidontLines(repoPath: repoPath).contains { $0.contains("amfidont_supervisor") }
+    }
+
+    /// The long-lived bypass worker: `python -m amfidont --spoof-apple --path
+    /// REPO`. Excludes the supervisor and the short-lived `daemon` launcher,
+    /// which carries a ` daemon ` token the worker does not.
+    nonisolated private static func isWorkerRunning(repoPath: String) -> Bool {
+        amfidontLines(repoPath: repoPath).contains {
+            !$0.contains("supervisor") && !$0.contains(" daemon ")
+        }
+    }
+
+    /// Launch the watchdog (as the current user). It self-daemonizes and uses
+    /// the scoped NOPASSWD rule for its own `sudo -n` worker launches, so this
+    /// needs no extra privilege and returns promptly.
+    nonisolated private static func startSupervisor(python: String, repoPath: String) {
+        let script = repoPath + "/scripts/amfidont_supervisor.sh"
+        guard FileManager.default.isExecutableFile(atPath: script) else { return }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        p.arguments = [script, "--python", python, "--path", repoPath]
+        let out = Pipe()
+        p.standardOutput = out
+        p.standardError = out
+        guard (try? p.run()) != nil else { return }
+        // The foreground invocation exits as soon as it forks the detached loop.
+        _ = out.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
     }
 
     nonisolated private static func startAmfidont(python: String, repoPath: String) -> AmfidontResult {
@@ -187,14 +244,19 @@ final class VPhonePrivilege {
         // amfidont self-daemonizes, so sudo returns promptly; poll to confirm.
         for _ in 0 ..< 12 {
             if !p.isRunning { break }
-            if isAmfidontRunning(repoPath: repoPath) { break }
+            if isWorkerRunning(repoPath: repoPath) { break }
             Thread.sleep(forTimeInterval: 0.25)
         }
         let text = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
         if text.contains("a password is required") || text.contains("a terminal is required") {
             return .needsAuthorization
         }
-        if isAmfidontRunning(repoPath: repoPath) { return .started }
+        if isWorkerRunning(repoPath: repoPath) { return .started }
+        // The daemon launched a worker but it isn't up yet. The common cause is
+        // amfid being mid-recycle, so the worker's lldb attach raced and exited
+        // (`Unexpected process state 10`). That's recoverable — the supervisor
+        // will relaunch it — so report success-pending rather than a hard fail.
+        if text.contains("amfidont daemon started") { return .started }
         return .failed(text.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 

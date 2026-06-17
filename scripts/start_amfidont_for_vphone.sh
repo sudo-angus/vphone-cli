@@ -5,6 +5,12 @@
 # - uses the project path so amfidont covers binaries relevant for the project
 # - starts amfidont in daemon mode so signed vphone-cli launches are allowlisted
 # - spoofs signatures to be recognized as apple signed for patchless variant
+#
+# Wrapped in amfidont_supervisor.sh so the bypass survives amfid being
+# launchd-recycled (which otherwise kills the worker with
+# `RuntimeError: Unexpected process state 10` and silently drops the bypass).
+# Run under sudo so the supervisor and worker run as root, and so the sudo
+# credential cache is warmed for the later `--tcp-workaround` helper.
 
 set -euo pipefail
 
@@ -31,9 +37,8 @@ if [[ -z "$PYTHON_BIN" ]]; then
   exit 1
 fi
 
-sudo "$PYTHON_BIN" -m amfidont daemon \
-    --path "$PROJECT_ROOT" \
-    --spoof-apple \
-    >/dev/null 2>&1
+sudo zsh "${SCRIPT_DIR}/amfidont_supervisor.sh" \
+    --python "$PYTHON_BIN" \
+    --path "$PROJECT_ROOT"
 
 echo "amfidont started"
