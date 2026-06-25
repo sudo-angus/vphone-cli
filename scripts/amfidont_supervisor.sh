@@ -75,15 +75,17 @@ launch_worker() {
   fi
 }
 
-# Self-daemonize: re-exec into a detached session, leaving the foreground
-# invocation to report the pid and return.
+# Self-daemonize, leaving the foreground invocation to report the pid and
+# return. macOS has no `setsid`; `nohup … &` plus the parent exiting is enough —
+# the child ignores SIGHUP and reparents to launchd, so the watchdog outlives
+# both this shell and the (Swift) process that launched it.
 if [[ "${_AMFIDONT_SUP_CHILD:-}" != "1" ]]; then
   # Refuse to stack a second supervisor on the same repo.
   if pgrep -fl amfidont_supervisor 2>/dev/null | grep -qF -- "--path $PROJECT_ROOT"; then
     echo "amfidont supervisor already running for $PROJECT_ROOT"
     exit 0
   fi
-  _AMFIDONT_SUP_CHILD=1 setsid "$0" --python "$PYTHON_BIN" --path "$PROJECT_ROOT" --log "$LOG" \
+  _AMFIDONT_SUP_CHILD=1 nohup "$0" --python "$PYTHON_BIN" --path "$PROJECT_ROOT" --log "$LOG" \
     >>"$LOG" 2>&1 </dev/null &
   echo "amfidont supervisor started (pid: $!)"
   exit 0

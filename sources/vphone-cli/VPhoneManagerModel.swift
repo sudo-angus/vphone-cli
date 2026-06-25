@@ -93,8 +93,12 @@ final class VPhoneManagerModel {
         supervisor.reconcileAdoptions(vms)
         if selection == nil { selection = vms.first?.id }
         computeSizes()
-        await refreshAuth()
+        // Start the heartbeat before the amfidont check: that check shells out to
+        // sudo/python and has wedged here before, and the VM lifecycle UI (the
+        // "Starting" → "Running" transition lives on this timer) must never be
+        // held hostage to it.
         health.start()
+        await refreshAuth()
     }
 
     func teardownForQuit() {

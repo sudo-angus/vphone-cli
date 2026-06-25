@@ -247,17 +247,52 @@ final class VPhonePrivilege {
             if isWorkerRunning(repoPath: repoPath) { break }
             Thread.sleep(forTimeInterval: 0.25)
         }
-        let text = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        // The worker is up — that *is* the success signal, so return before
+        // touching the pipe. The daemonized worker inherits this pipe's write
+        // end and holds it open for its whole lifetime, so reading to EOF would
+        // block here forever (it wedged the manager's bootstrap, pinning every
+        // VM at "Starting" because `health.start()` never got to run).
+        if isWorkerRunning(repoPath: repoPath) { return .started }
+
+        // Worker didn't come up: read the launcher's banner to tell an auth
+        // prompt apart from a real failure. Bounded (never waits for EOF) so a
+        // worker that daemonized but escaped detection can't reblock us.
+        let text = drainAvailable(out.fileHandleForReading, deadline: 1.0)
         if text.contains("a password is required") || text.contains("a terminal is required") {
             return .needsAuthorization
         }
-        if isWorkerRunning(repoPath: repoPath) { return .started }
         // The daemon launched a worker but it isn't up yet. The common cause is
         // amfid being mid-recycle, so the worker's lldb attach raced and exited
         // (`Unexpected process state 10`). That's recoverable — the supervisor
         // will relaunch it — so report success-pending rather than a hard fail.
         if text.contains("amfidont daemon started") { return .started }
         return .failed(text.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    /// Read whatever is buffered on `handle` without waiting for EOF. We launch
+    /// daemons that keep this pipe's write end open for their whole lifetime, so
+    /// `readDataToEndOfFile()` can block indefinitely; the startup banner we need
+    /// is already buffered by the time we call this. `poll()` slices give up once
+    /// the pipe goes quiet (or hits `deadline`), so this always returns.
+    nonisolated private static func drainAvailable(_ handle: FileHandle, deadline: TimeInterval) -> String {
+        let fd = handle.fileDescriptor
+        guard fd >= 0 else { return "" }
+        var data = Data()
+        var buf = [UInt8](repeating: 0, count: 4096)
+        let end = Date().addingTimeInterval(deadline)
+        while Date() < end {
+            var pfd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+            let r = poll(&pfd, 1, 100) // 100 ms slice
+            if r > 0, pfd.revents & Int16(POLLIN) != 0 {
+                let n = read(fd, &buf, buf.count)
+                if n > 0 { data.append(contentsOf: buf[..<n]) } else { break } // EOF / error
+            } else if r == 0 {
+                if !data.isEmpty { break } // quiet after we already captured output
+            } else {
+                break // poll error
+            }
+        }
+        return String(data: data, encoding: .utf8) ?? ""
     }
 
     nonisolated private static func runCapture(_ launch: String, _ args: [String]) -> (Int32, String) {
