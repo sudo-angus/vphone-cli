@@ -4,6 +4,10 @@
 
 # ─── Configuration (override with make VAR=value) ─────────────────
 VM_DIR      ?= vm
+# Absolute VM path: handles both relative (default `vm`) and absolute
+# (e.g. external SSD) VM_DIR values. `abspath` leaves absolute paths intact
+# and joins relative ones against CURDIR — use this for the VM directory arg.
+VM_DIR_ABS  := $(abspath $(VM_DIR))
 CPU         ?= 8          # CPU cores (only used during vm_new)
 MEMORY      ?= 8192       # Memory in MB (only used during vm_new)
 DISK_SIZE   ?= 64         # Disk size in GB (only used during vm_new)
@@ -55,7 +59,7 @@ help:
 	@echo "                                       DT identity properties, post-restore DT rewrite, opt-in build spoof)"
 	@echo "             LESS=1                    Build, keeping iOS security mitigations enabled."
 	@echo "             SKIP_PROJECT_SETUP=1      Skip setup_tools/build"
-	@echo "             NONE_INTERACTIVE=1        Auto-continue prompts + boot analysis"
+	@echo "             INTERACTIVE=1             Prompt at first-boot stages (default: non-interactive)"
 	@echo "             SUDO_PASSWORD=...         Preload sudo credential for setup flow"
 	@echo "             NO_BINPACK=1              Excludes the SSH, VNC, ... binaries from being installed (patchless-only, currently)"
 	@echo "             NO_VPHONED=1              Excludes vphoned from being installed (patchless-only, currently)"
@@ -124,6 +128,14 @@ help:
 	@echo "  make fw_patch_exp            Patch boot chain with Swift pipeline (JB + EXP experimental)"
 	@echo "  make fw_cache_list           List cached firmware in ipsws/ with per-firmware sizes"
 	@echo ""
+	@echo "Testing:"
+	@echo "  make test_jb_patches         Run all JB kernel patches (incl. Sandbox) over every supported cloudOS kernel"
+	@echo "    Options: QUICK=1           Only the local/newest kernel (fast dev loop)"
+	@echo "  make test_fw_patches         Run the FULL patch-firmware pipeline (boot chain + base kernel + JB + EXP) over"
+	@echo "                               each local cloudOS firmware; fails on any skipped sub-patch (broad drift gate)"
+	@echo "    Options: QUICK=1           Only the newest local cloudOS firmware"
+	@echo "             VARIANTS=\"exp\"     Limit to specific variants (default: jb exp)"
+	@echo ""
 	@echo "Restore:"
 	@echo "  make restore_get_shsh        Dump SHSH response from Apple"
 	@echo "  make restore                 Restore to device (pymobiledevice3 backend)"
@@ -165,7 +177,7 @@ define setup_machine_run
 		exit 1; \
 	fi
 	SUDO_PASSWORD="$(SUDO_PASSWORD)" \
-	NONE_INTERACTIVE="$(NONE_INTERACTIVE)" \
+	INTERACTIVE="$(INTERACTIVE)" \
 	NO_BINPACK="$(NO_BINPACK)" \
 	NO_VPHONED="$(NO_VPHONED)" \
 	SPOOF_BUILD="$(SPOOF_BUILD)" \
@@ -490,12 +502,12 @@ fw_prepare:
 	cd $(VM_DIR) && bash "$(CURDIR)/$(SCRIPTS)/fw_prepare.sh"
 
 fw_patch: patcher_build
-	"$(CURDIR)/$(PATCHER_BINARY)" patch-firmware --vm-directory "$(CURDIR)/$(VM_DIR)" --variant regular
+	"$(CURDIR)/$(PATCHER_BINARY)" patch-firmware --vm-directory "$(VM_DIR_ABS)" --variant regular
 
 UID := $(shell id -u)
 ifeq ($(UID),0)
 fw_patch_less: patcher_build
-	"$(CURDIR)/$(PATCHER_BINARY)" patch-firmware --vm-directory "$(CURDIR)/$(VM_DIR)" \
+	"$(CURDIR)/$(PATCHER_BINARY)" patch-firmware --vm-directory "$(VM_DIR_ABS)" \
 	--variant less \
 	$(if $(filter 1 true yes YES TRUE,$(NO_BINPACK)),--no-binpack,)
 	$(if $(filter 1 true yes YES TRUE,$(NO_VPHONED)),--no-vphoned,)
@@ -506,13 +518,36 @@ fw_patch_less:
 endif
 
 fw_patch_dev: patcher_build
-	"$(CURDIR)/$(PATCHER_BINARY)" patch-firmware --vm-directory "$(CURDIR)/$(VM_DIR)" --variant dev
+	"$(CURDIR)/$(PATCHER_BINARY)" patch-firmware --vm-directory "$(VM_DIR_ABS)" --variant dev
 
 fw_patch_jb: patcher_build
-	"$(CURDIR)/$(PATCHER_BINARY)" patch-firmware --vm-directory "$(CURDIR)/$(VM_DIR)" --variant jb
+	"$(CURDIR)/$(PATCHER_BINARY)" patch-firmware --vm-directory "$(VM_DIR_ABS)" --variant jb
 
 fw_patch_exp: patcher_build
-	"$(CURDIR)/$(PATCHER_BINARY)" patch-firmware --vm-directory "$(CURDIR)/$(VM_DIR)" --variant exp
+	"$(CURDIR)/$(PATCHER_BINARY)" patch-firmware --vm-directory "$(VM_DIR_ABS)" --variant exp
+
+.PHONY: test_jb_patches
+
+# Run the full JB kernel patch layer (every hook, incl. all Sandbox ops hooks)
+# over EVERY cloudOS kernel the README supports — correctness + backward-compat.
+# Downloads each version's kernelcache on demand (cached under /tmp/vphone_kjb_versions).
+#   Options: QUICK=1   Only the local/newest kernel (fast dev loop)
+test_jb_patches: patcher_build
+	zsh "$(CURDIR)/tests/test_jb_kernel_patches.sh" --no-build \
+		$(if $(filter 1 true yes YES TRUE,$(QUICK)),--quick,)
+
+.PHONY: test_fw_patches
+
+# Run the FULL patch-firmware pipeline (boot chain + base kernel + JB + EXP, every
+# component) over each locally-prepared cloudOS firmware, for the jb and exp
+# variants, and fail if ANY component skips a sub-patch (a `[-]` line). This is the
+# broad gate that catches drift outside the JB kernel layer (iBSS/iBEC/LLB, base
+# KernelPatcher, TXM, DeviceTree) — which test_jb_patches structurally cannot see.
+#   Options: QUICK=1            Only the newest local cloudOS firmware
+#            VARIANTS="exp"     Limit to specific variants (default: jb exp)
+test_fw_patches: patcher_build
+	zsh "$(CURDIR)/tests/test_firmware_patches.sh" --no-build \
+		$(if $(filter 1 true yes YES TRUE,$(QUICK)),--quick,)
 
 # Read-only inventory of the firmware cache (ipsws/), with per-firmware sizes.
 .PHONY: fw_cache_list
@@ -529,8 +564,8 @@ fw_cache_list:
 define _resolve_ecid
 	if [ -n "$(RESTORE_ECID)" ]; then \
 		ECID="$(RESTORE_ECID)"; \
-	elif [ -f "$(CURDIR)/$(VM_DIR)/udid-prediction.txt" ]; then \
-		ECID=$$(grep '^ECID=' "$(CURDIR)/$(VM_DIR)/udid-prediction.txt" | head -1 | cut -d= -f2); \
+	elif [ -f "$(VM_DIR_ABS)/udid-prediction.txt" ]; then \
+		ECID=$$(grep '^ECID=' "$(VM_DIR_ABS)/udid-prediction.txt" | head -1 | cut -d= -f2); \
 	fi; \
 	if [ -z "$$ECID" ]; then \
 		echo "[-] Cannot resolve ECID — set RESTORE_ECID or run 'make boot_dfu' first"; \
@@ -554,12 +589,12 @@ restore:
 
 restore_offline:
 	@$(call _resolve_ecid); \
-	SHSH=$$(ls "$(CURDIR)/$(VM_DIR)/"*.shsh 2>/dev/null | head -1); \
+	SHSH=$$(ls "$(VM_DIR_ABS)/"*.shsh 2>/dev/null | head -1); \
 	if [ -z "$$SHSH" ]; then \
 		echo "[-] No .shsh file in $(VM_DIR)/ — run 'make restore_get_shsh' first"; \
 		exit 1; \
 	fi; \
-	RESTORE_SRC=$$(echo "$(CURDIR)/$(VM_DIR)/iPhone"*_Restore); \
+	RESTORE_SRC=$$(echo "$(VM_DIR_ABS)/iPhone"*_Restore); \
 	if [ ! -d "$$RESTORE_SRC" ]; then \
 		echo "[-] No iPhone*_Restore directory in $(VM_DIR)/"; \
 		exit 1; \

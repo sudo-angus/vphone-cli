@@ -16,6 +16,7 @@ class VPhoneAppDelegate: NSObject, NSApplicationDelegate {
     private var transparentProxy: VPhoneTransparentProxy?
     private var socks5Bridge: VPhoneSocks5Bridge?
     private var usbmuxForwarders: [VPhoneUSBMuxForwarder] = []
+    private var cameraServer: VPhoneCameraServer?
     private var sigintSource: DispatchSourceSignal?
     private var didAttemptAutoInstall = false
 
@@ -99,6 +100,9 @@ class VPhoneAppDelegate: NSObject, NSApplicationDelegate {
             let provider = VPhoneLocationProvider(control: control)
             locationProvider = provider
 
+            let camServer = VPhoneCameraServer()
+            cameraServer = camServer
+
             if let device = vm.virtualMachine.socketDevices.first as? VZVirtioSocketDevice {
                 control.connect(device: device)
                 if cli.socks5Port > 0 {
@@ -106,6 +110,7 @@ class VPhoneAppDelegate: NSObject, NSApplicationDelegate {
                     bridge.start(device: device)
                     socks5Bridge = bridge
                 }
+                camServer.connect(device: device)
             }
         }
 
@@ -151,6 +156,14 @@ class VPhoneAppDelegate: NSObject, NSApplicationDelegate {
             }
             if let provider = locationProvider {
                 mc.locationProvider = provider
+            }
+            if let camServer = cameraServer {
+                mc.cameraServer = camServer
+                camServer.onConnectionStateChange = { [weak mc] connected in
+                    Task { @MainActor in
+                        mc?.updateCameraConnectionState(connected: connected)
+                    }
+                }
             }
             let recorder = VPhoneScreenRecorder()
             mc.screenRecorder = recorder

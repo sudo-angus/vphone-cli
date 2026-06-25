@@ -70,6 +70,7 @@ extension VPhoneMenuController {
 
         menu.addItem(buildLocationSubmenu())
         menu.addItem(buildBatterySubmenu())
+        menu.addItem(buildCameraSubmenu())
 
         item.submenu = menu
         return item

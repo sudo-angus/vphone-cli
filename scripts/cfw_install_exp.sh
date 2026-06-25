@@ -87,20 +87,45 @@ elif [[ ! -f "$JB_SYSOS_DMG" ]]; then
 fi
 
 if [[ -f "$JB_SYSOS_DMG" ]]; then
-    # Mount, patch chunks, unmount. Idempotent: re-running on an already
-    # patched DMG is a no-op (patcher detects already-patched form).
-    echo "[*] hv_vmm DSC patch: mounting cached SystemOS DMG..."
+    # Mount, patch chunks (hv_vmm + camera, same cryptex), unmount.
+    # Idempotent: re-running on an already-patched DMG is a no-op
+    # (hv_vmm patcher detects already-patched cstrings; camera patcher
+    # refuses pre-patched function entries unless --force is passed).
+    echo "[*] DSC patches: mounting cached SystemOS DMG..."
     mkdir -p "$JB_MNT_SYSOS"
     sudo hdiutil detach "$JB_MNT_SYSOS" -force 2>/dev/null || true
     sudo hdiutil attach -mountpoint "$JB_MNT_SYSOS" "$JB_SYSOS_DMG" -nobrowse -owners off
 
     JB_DSC_CHUNKS_DIR="$JB_MNT_SYSOS/System/Library/Caches/com.apple.dyld"
+    JB_DSC_HEADER="$JB_DSC_CHUNKS_DIR/dyld_shared_cache_arm64e"
     if [[ -d "$JB_DSC_CHUNKS_DIR" ]]; then
         echo "[*] hv_vmm DSC patch: patching chunks under $JB_DSC_CHUNKS_DIR..."
         "$SCRIPT_DIR/patch_hv_vmm_userland.sh" dsc "$JB_DSC_CHUNKS_DIR"
         echo "[+] hv_vmm DSC patch: chunks patched"
+
+        # Camera DSC patches: (1) short-circuit the NeutrinoCore
+        # _NUStyleTransfer*Processor methods so Camera.app's style-
+        # thumbnail pipeline doesn't crash on this VM build, and (2)
+        # force +[AVCaptureDevice authorizationStatusForMediaType:] =
+        # Authorized so apps don't bail at the TCC gate. Both are
+        # resolved per-build via `ipsw dyld symaddr` and verified by
+        # pacibsp prologue match — version-portable as long as the
+        # named ObjC symbols continue to exist. Combined with the
+        # /product/camera DT node added at fw_patch time, this lets
+        # Camera.app's icon show on Home Screen and the app launch
+        # without immediately bailing.
+        if [[ -f "$JB_DSC_HEADER" ]]; then
+            echo "[*] camera DSC patch: patching chunks under $JB_DSC_CHUNKS_DIR..."
+            if "$SCRIPT_DIR/patch_camera_userland.sh" dsc "$JB_DSC_CHUNKS_DIR" "$JB_DSC_HEADER"; then
+                echo "[+] camera DSC patch: chunks patched"
+            else
+                echo "[!] camera DSC patch: failed (likely build-version mismatch); continuing"
+            fi
+        else
+            echo "[-] camera DSC patch: $JB_DSC_HEADER not found, skipping"
+        fi
     else
-        echo "[-] hv_vmm DSC patch: $JB_DSC_CHUNKS_DIR not found, skipping"
+        echo "[-] DSC patches: $JB_DSC_CHUNKS_DIR not found, skipping"
     fi
 
     sudo hdiutil detach "$JB_MNT_SYSOS" -force
@@ -216,6 +241,76 @@ build_tweakloader() {
         -dynamiclib \
         -fobjc-arc -O3 \
         -framework Foundation \
+        -o "$out" \
+        "$src"
+
+    ldid_sign "$out"
+    echo "$out"
+}
+
+# Builds the libvcamcaptured.dylib injected into /usr/libexec/cameracaptured
+# via the TweakLoader allowlist. Output goes to TEMP_DIR; caller scp's the
+# binary + companion plist to procursus/Library/MobileSubstrate/DynamicLibraries.
+build_libvcamcaptured() {
+    local src="$SCRIPT_DIR/vcamcaptured/libvcamcaptured.m"
+    local out="$TEMP_DIR/libvcamcaptured.dylib"
+    local sdk cc
+
+    [[ -f "$src" ]] || die "Missing libvcamcaptured source at $src"
+
+    sdk="$(xcrun --sdk iphoneos --show-sdk-path)"
+    cc="$(xcrun --sdk iphoneos -f clang)"
+
+    "$cc" -isysroot "$sdk" \
+        -arch arm64e \
+        -miphoneos-version-min=15.0 \
+        -dynamiclib \
+        -fobjc-arc -Os \
+        -install_name /var/jb/usr/lib/libvcamcaptured.dylib \
+        -framework CoreMedia \
+        -framework CoreVideo \
+        -framework Foundation \
+        -o "$out" \
+        "$src"
+
+    ldid_sign "$out"
+    echo "$out"
+}
+
+# Builds the libcamfix.dylib substrate plugin. Loaded into every process
+# that links AVFoundation via TweakLoader's Filter.Frameworks key —
+# Camera.app, third-party apps, anywhere the
+# documented capture interface is used. Implements the photo-delivery
+# path through CAMCaptureEngine + the preview/state guards that keep
+# the viewfinder live on the virtual camera.
+build_libcamfix() {
+    local src="$SCRIPT_DIR/camfix/libcamfix.m"
+    local out="$TEMP_DIR/libcamfix.dylib"
+    local sdk cc
+
+    [[ -f "$src" ]] || die "Missing libcamfix source at $src"
+
+    sdk="$(xcrun --sdk iphoneos --show-sdk-path)"
+    cc="$(xcrun --sdk iphoneos -f clang)"
+
+    "$cc" -isysroot "$sdk" \
+        -arch arm64e \
+        -miphoneos-version-min=15.0 \
+        -dynamiclib \
+        -fobjc-arc -Os \
+        -install_name /var/jb/Library/MobileSubstrate/DynamicLibraries/libcamfix.dylib \
+        -framework AVFoundation \
+        -framework CoreImage \
+        -framework CoreGraphics \
+        -framework CoreMedia \
+        -framework CoreVideo \
+        -framework Foundation \
+        -framework ImageIO \
+        -framework IOSurface \
+        -framework MobileCoreServices \
+        -framework Photos \
+        -framework QuartzCore \
+        -framework UIKit \
         -o "$out" \
         "$src"
 
@@ -479,6 +574,49 @@ ssh_cmd "/bin/chmod 0755 /mnt5/$BOOT_HASH/$JB_DIR_NAME/procursus/usr/lib/TweakLo
 
 echo "  [+] TweakLoader installed to procursus/usr/lib/TweakLoader.dylib"
 
+# ═══════════ JB-4.1 INSTALL libvcamcaptured ═════════════════════════
+# Inject dylib loaded into /usr/libexec/cameracaptured (via TweakLoader
+# allowlist in TweakLoader.m's kVPhoneAllowedDaemonPaths). Hosts the
+# synthetic FigCaptureSource + shm-frame reader paired with vphoned's
+# vsock 1338 listener on the guest side.
+echo ""
+echo "[JB-4.1] Building and installing libvcamcaptured..."
+LIBVCAM_OUT="$(build_libvcamcaptured)"
+LIBVCAM_DIR="/mnt5/$BOOT_HASH/$JB_DIR_NAME/procursus/Library/MobileSubstrate/DynamicLibraries"
+ssh_cmd "/bin/mkdir -p $LIBVCAM_DIR"
+scp_to "$LIBVCAM_OUT" "$LIBVCAM_DIR/libvcamcaptured.dylib"
+ssh_cmd "/usr/sbin/chown 0:0 $LIBVCAM_DIR/libvcamcaptured.dylib"
+ssh_cmd "/bin/chmod 0755 $LIBVCAM_DIR/libvcamcaptured.dylib"
+
+# The plist tells TweakLoader to load the dylib only inside cameracaptured
+# (Filter.Executables = ["cameracaptured"]); keep it next to the dylib.
+LIBVCAM_PLIST="$SCRIPT_DIR/vcamcaptured/libvcamcaptured.plist"
+if [[ -f "$LIBVCAM_PLIST" ]]; then
+    scp_to "$LIBVCAM_PLIST" "$LIBVCAM_DIR/libvcamcaptured.plist"
+    ssh_cmd "/bin/chmod 0644 $LIBVCAM_DIR/libvcamcaptured.plist"
+fi
+echo "  [+] libvcamcaptured installed to procursus/Library/MobileSubstrate/DynamicLibraries/"
+
+# ═══════════ JB-4.2 INSTALL libcamfix ═══════════════════════════════
+# Substrate plugin loaded by TweakLoader into every process that links
+# AVFoundation. The companion plist's Filter.Frameworks = ["AVFoundation"]
+# tells TweakLoader to defer the dlopen until AVFoundation actually
+# appears in the loaded image list (via _dyld_register_func_for_add_image),
+# so processes that don't use AVF don't pay any cost.
+echo ""
+echo "[JB-4.2] Building and installing libcamfix..."
+LIBCAMFIX_OUT="$(build_libcamfix)"
+scp_to "$LIBCAMFIX_OUT" "$LIBVCAM_DIR/libcamfix.dylib"
+ssh_cmd "/usr/sbin/chown 0:0 $LIBVCAM_DIR/libcamfix.dylib"
+ssh_cmd "/bin/chmod 0755 $LIBVCAM_DIR/libcamfix.dylib"
+
+LIBCAMFIX_PLIST="$SCRIPT_DIR/camfix/libcamfix.plist"
+if [[ -f "$LIBCAMFIX_PLIST" ]]; then
+    scp_to "$LIBCAMFIX_PLIST" "$LIBVCAM_DIR/libcamfix.plist"
+    ssh_cmd "/bin/chmod 0644 $LIBVCAM_DIR/libcamfix.plist"
+fi
+echo "  [+] libcamfix installed to procursus/Library/MobileSubstrate/DynamicLibraries/"
+
 # ═══════════ JB-5 DEPLOY FIRST-BOOT SETUP ══════════════════════
 echo ""
 echo "[JB-5] Deploying first-boot setup..."
@@ -609,6 +747,7 @@ fi
 echo ""
 echo "[*] Unmounting device filesystems..."
 ssh_cmd "/sbin/umount /mnt1 2>/dev/null || true"
+ssh_cmd "/sbin/umount /mnt2 2>/dev/null || true"
 ssh_cmd "/sbin/umount /mnt3 2>/dev/null || true"
 ssh_cmd "/sbin/umount /mnt5 2>/dev/null || true"
 

@@ -59,11 +59,11 @@ IPROXY_TARGET_UDID=""
 IPROXY_RESOLVE_REASON=""
 BOOT_ANALYSIS_TIMEOUT="${BOOT_ANALYSIS_TIMEOUT:-300}"
 BOOT_PROMPT_FALLBACK_TIMEOUT="${BOOT_PROMPT_FALLBACK_TIMEOUT:-60}"
-BOOT_BASH_PROMPT_REGEX="${BOOT_BASH_PROMPT_REGEX:-bash-[0-9]+(\.[0-9]+)+#}"
+BOOT_BASH_PROMPT_REGEX="${BOOT_BASH_PROMPT_REGEX:-bash-[0-9]+(\.[0-9]+)+#|:/[^ ]* root#}"
 BOOT_PANIC_REGEX="${BOOT_PANIC_REGEX:-(^|[^p])(panic|kernel panic|panic\\.apple\\.com|stackshot succeeded)}"
 PMD3_BRIDGE="${PMD3_BRIDGE:-${PROJECT_ROOT}/scripts/pymobiledevice3_bridge.py}"
-NONE_INTERACTIVE_RAW="${NONE_INTERACTIVE:-0}"
-NONE_INTERACTIVE=0
+INTERACTIVE_RAW="${INTERACTIVE:-0}"
+NON_INTERACTIVE=1
 NO_BINPACK_RAW="${NO_BINPACK:-0}"
 NO_BINPACK=0
 NO_VPHONED_RAW="${NO_VPHONED:-0}"
@@ -1008,7 +1008,7 @@ Options:
                           firmware artifacts in vm/ are reused as-is.
 
 Environment:
-  NONE_INTERACTIVE=1      Auto-continue first-boot prompts + run final boot analysis.
+  INTERACTIVE=1           Prompt at first-boot stages (default: non-interactive — auto-continue + boot analysis).
   SUDO_PASSWORD=...       Preload sudo credential via askpass.
   NO_BINPACK=1            Excludes the SSH, VNC, ... binaries from being installed (patchless-only, currently)
   NO_VPHONED=1            Excludes vphoned from being installed (patchless-only, currently)
@@ -1059,8 +1059,8 @@ preflight_install_phase() {
 
 main() {
   parse_args "$@"
-  if parse_bool "$NONE_INTERACTIVE_RAW"; then
-    NONE_INTERACTIVE=1
+  if parse_bool "$INTERACTIVE_RAW"; then
+    NON_INTERACTIVE=0
   fi
   if parse_bool "$NO_BINPACK_RAW"; then
     NO_BINPACK=1
@@ -1100,7 +1100,7 @@ main() {
     mode_label="less"
   fi
 
-  echo "[*] setup_machine mode: ${mode_label}, phase=${PHASE}, project_setup=$([[ "$SKIP_PROJECT_SETUP" -eq 1 ]] && echo "skip" || echo "run"), non_interactive=${NONE_INTERACTIVE}, no_binpack=${NO_BINPACK}, no_vphoned=${NO_VPHONED}"
+  echo "[*] setup_machine mode: ${mode_label}, phase=${PHASE}, project_setup=$([[ "$SKIP_PROJECT_SETUP" -eq 1 ]] && echo "skip" || echo "run"), non_interactive=${NON_INTERACTIVE}, no_binpack=${NO_BINPACK}, no_vphoned=${NO_VPHONED}"
 
   # ── Phase 1 (prep): project setup + firmware + restore ─────────
   if [[ "$PHASE" != "install" ]]; then
@@ -1192,15 +1192,15 @@ main() {
   if [[ "$LESS_MODE" -eq 0 || "$NO_BINPACK" -eq 0 ]]; then
     echo ""
     echo "=== First boot ==="
-    if [[ "$NONE_INTERACTIVE" -eq 0 ]]; then
+    if [[ "$NON_INTERACTIVE" -eq 0 ]]; then
       read -r "?[*] press Enter to start VM, after the VM has finished booting, press Enter again to finish last stage"
     else
-      echo "[*] NONE_INTERACTIVE=1: auto-starting first boot"
+      echo "[*] non-interactive (default): auto-starting first boot"
     fi
 
     start_first_boot
 
-    if [[ "$NONE_INTERACTIVE" -eq 0 ]]; then
+    if [[ "$NON_INTERACTIVE" -eq 0 ]]; then
       read -r "?[*] Press Enter once the VM is fully booted"
     else
       wait_for_first_boot_prompt_auto

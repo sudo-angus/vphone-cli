@@ -25,6 +25,23 @@
 > - **SystemVersion.plist `ProductBuildVersion` (EXP-JB-7, opt-in)** — gated on
 >   `SPOOF_BUILD=<id>`. Rewrites the build identifier in the rootfs and
 >   cryptex copies of `SystemVersion.plist`.
+> - **Camera.app accessibility** — at fw_patch time: the `/product/camera`
+>   node, two `/product` cam-offset rewrites (Tier B), three new
+>   `/product` child nodes `facetime` / `audio` / `iopm` (Tier C), and
+>   five minimal `/arm-io` stubs `isp` / `ispRtb` /
+>   `smc/iop-smc-nub/smc-ext-charger` carrying camera-front, camera-rear
+>   and camera-driver (Tier F). At install time: the 5
+>   `+[_NUStyleTransfer*Processor processWithInputs:...]` DSC
+>   short-circuits in NeutrinoCore plus a 1-instruction
+>   `+[AVCaptureDevice authorizationStatusForMediaType:]` rewrite in
+>   AVFCapture that returns `Authorized` for any media type
+>   (Stage 0 of the vcam stack — auth gate only; downstream
+>   cameracaptured/vcamd plumbing for actual frame delivery is open
+>   work). Together these make Camera.app's icon show on the home
+>   screen and in Spotlight, the viewfinder render, and arbitrary apps
+>   stop bailing on the camera permission check. The NeutrinoCore patch
+>   stops the viewfinder's CIImageProcessorKernel chain from asserting
+>   on a nil descriptor when ANE detection comes back NO on the VM.
 
 ## Boot Chain Patches
 
@@ -113,7 +130,7 @@
 | JB-06 | B     | `patch_post_validation_additional`    | `_postValidation` (additional)                                                                       | Disable SHA256-only hash-type reject                                                                                                                                                 |     Y      |
 | JB-07 | C     | `patch_syscallmask_apply_to_proc`     | syscallmask apply wrapper (`_proc_apply_syscall_masks` path)                                         | Faithful upstream C22: mutate installed Unix/Mach/KOBJ masks to all-ones via structural cave, then continue into setter; distinct from `NULL`-mask alternative                       |     Y      |
 | JB-08 | A     | `patch_task_conversion_eval_internal` | `_task_conversion_eval_internal`                                                                     | Allow task conversion                                                                                                                                                                |     Y      |
-| JB-09 | A     | `patch_sandbox_hooks_extended`        | Sandbox MACF ops (extended)                                                                          | Stub remaining 30+ sandbox hooks (incl. IOKit 201..210)                                                                                                                              |     Y      |
+| JB-09 | A     | `patch_sandbox_hooks_extended`        | Sandbox MACF ops (extended)                                                                          | Stub remaining 30+ sandbox hooks (incl. IOKit 201..210)|     Y      |
 | JB-10 | A     | `patch_iouc_failed_macf`              | IOUC MACF shared gate                                                                                | A5-v2: patch only the post-`mac_iokit_check_open` deny gate (`CBZ W0, allow` -> `B allow`) and keep the rest of the IOUserClient open path intact                                    |     Y      |
 | JB-11 | B     | `patch_proc_security_policy`          | `_proc_security_policy`                                                                              | Bypass security policy                                                                                                                                                               |     Y      |
 | JB-12 | B     | `patch_proc_pidinfo`                  | `_proc_pidinfo`                                                                                      | Allow pid 0 info                                                                                                                                                                     |     Y      |
@@ -434,6 +451,64 @@ binaries with `ldid_sign` tripped this check on `mobile_obliterator`.
   on the live `/mnt1/usr/libexec/watchdogd` (scp-down, patch, scp-up,
   chmod 0755). JB and DEV install scripts do NOT run this step.
 
+### DeviceTree `/product/camera` node addition at fw_patch time (EXP only)
+
+`DeviceTreePatcher` carries an `experimentalNodeAdditions` list with one
+entry — a `/device-tree/product/camera` child node. Applied only when
+`includeIdentityPatches` is true (i.e. variant `.exp`); other variants
+leave the product subtree unchanged.
+
+| Property                            | Type          | Value | Purpose                                                 |
+|-------------------------------------|---------------|-------|---------------------------------------------------------|
+| `name`                              | cstring       | `camera` | DT node name (auto-added from `nodeName`).           |
+| `aggregate-camera`                  | uint32        | `1`   | Backs MG `aggregateCameraCapability` getter.            |
+| `auto-focus`                        | uint32        | `1`   | Backs MG `autoFocusCameraCapability` getter.            |
+| `flash`                             | uint32        | `1`   | Backs MG `cameraFlashCapability` getter.                |
+| `pearl-camera`                      | uint32        | `1`   | Backs MG `pearlCameraCapability` getter.                |
+| `panorama`                          | uint32        | `1`   | Backs MG `panoramaCameraCapability` getter.             |
+| `pipelined-stillimage-capability`   | uint32        | `1`   | Backs MG `pipelinedStillImageCaptureCapability`.        |
+| `rear-burst`, `front-burst`         | uint32        | `1`   | Backs MG burst-capability getters.                      |
+| `video-cap`                         | uint32        | `2`   | Video capture level (real D47AP value).                 |
+| `camera-hdr-version`                | uint32        | `3`   | HDR version (real D47AP value).                         |
+| `camera-ui-version`                 | uint32        | `2`   | UI version selector (real D47AP value).                 |
+
+Why this is necessary: `libMobileGestalt.dylib` resolves
+`MGGetBoolAnswer("still-camera")` (cstring at vmaddr `0x1b1c5fedd`) via a
+chain that reads `IODeviceTree:/product/camera` (cstring at vmaddr
+`0x1b1c5832a`, **65 ADRP+ADD xrefs in the same dylib's `__text`**). The
+canonical iPhone17,3 D47AP DT carries this node with 64 capability
+properties; the vphone600AP DT ships **zero** `camera`, `audio`,
+`facetime`, or `back-camera` references under `/product`. Without
+the node, SpringBoard's `SBAppTags = ["still-camera"]` filter hides
+Camera.app's icon and refuses to launch the bundle.
+
+The node alone is not enough: the SBAppTags resolver also chains
+through `/product` direct properties (`assistant`, `dictation`,
+`compatible-device-fallback`, `chrome-identifier`, …), most of which
+ship as 12-byte `'syscfg/XXXX'` cstring placeholders on vphone600 and
+read back as NO. Tier 1d (below) rewrites those.
+
+Idempotent: re-running against an already-patched DT detects the
+existing child and skips.
+
+### Camera DSC patch (EXP only)
+
+`apply_all_camera_patches` in `scripts/patchers/cfw_patch_camera_dsc.py`
+runs two patch families. Symbols are resolved per-build via
+`ipsw dyld symaddr` against the cryptex's `dyld_shared_cache_arm64e`
+header.
+
+| # | Target | Framework | Effect |
+|---|---|---|---|
+| 1 | `+[_NUStyleTransfer{,Apply,Thumbnail,Learn,Interpolate}Processor processWithInputs:arguments:output:error:]` (5 entry points) | NeutrinoCore | Each replaced with `mov w0, #0; ret`. Camera's CIImageProcessorKernel chain that drives the style preview thumbnails short-circuits before reaching `+[_NUStyleEngine usingSharedStyleEngineForUsage:...]` → `_NUStyleEngineMemoryResource initWithDevice:descriptor:` which would otherwise assert on a nil descriptor (root cause is an upstream ANE-detection gate in `CMIStyleEngineCommonSettings`; we workaround at the consumer instead of unblocking it). |
+| 2 | `+[AVCaptureDevice authorizationStatusForMediaType:]` | AVFCapture | Replaced with `mov w0, #3; ret` (AVAuthorizationStatusAuthorized = 3). Any process probing camera/audio/etc. media-type authorization gets "Authorized" without going through TCC. Stage 0 of the vcam stack — makes apps stop bailing on the auth check. Audio still doesn't work on the VM, so the broader scope is harmless (audio consumers would have failed downstream regardless). Downstream pipeline (cameracaptured rewrite, vcamd daemon) still owed for actual frame delivery. |
+
+Wired into `cfw_install_exp.sh` immediately after the hv_vmm DSC step,
+inside the same `hdiutil attach` block (one mount/unmount per install).
+Page-hash re-attestation keeps the cryptex's CodeDirectory slots
+consistent with the modified pages so `amfid` / TXM accepts the DSC at
+next boot.
+
 ### DeviceTree identity properties at fw_patch time (EXP only)
 
 `DeviceTreePatcher` carries two property-patch lists: `basePropertyPatches`
@@ -459,6 +534,71 @@ EXP-JB-6 post-restore):
 Root `model` and root `target-type` are deliberately NOT in this list —
 both have been empirically shown to break restore. Those edits run
 post-restore as EXP-JB-6.
+
+Bulk `/product` direct-property completion (rewriting the ~30
+`'syscfg/XXXX'` placeholders to D47AP integer/string values) was
+attempted to make `MGGetBoolAnswer("still-camera")` answer YES via the
+DT path alone. It broke screen rendering on the VM (the display
+pipeline / framebuffer pulls one or more `/product` capability props
+during init and chooses a render path the VM can't service). Reverted.
+A narrower set targeted at the Camera-icon resolver chain (Tier B + C
++ F, below) does work without breaking display.
+
+### DeviceTree Camera-icon completion (Tier B + C + F, EXP only)
+
+Two `PropertyPatch` entries in `identityPropertyPatches`, three
+`AddChildNodePatch` entries appended to `experimentalNodeAdditions`
+for `/product/*` children, and five more for `/arm-io/*` stubs.
+Empirically: this is the set that makes Camera.app's icon visible on
+the home screen and in Spotlight without breaking screen rendering.
+
+**Tier B — `/product` cam-offset rewrites.** vphone600 ships these
+as 12-byte `'syscfg/{fcof,rcof}'` cstring placeholders. d47ap carries
+20-byte little-endian geometry blobs. Consumed by Camera.app / ARKit
+/ FaceTime for image-centering math.
+
+| Property | Old length | New length | New value (hex) |
+|----------|:----------:|:----------:|------------------|
+| `/product::front-cam-offset-from-center` | 12 | 20 | `61000100921c0000d8130000e803000000000000` |
+| `/product::rear-cam-offset-from-center`  | 12 | 20 | `eda50000b256000059080000e803000000000000` |
+
+**Tier C — new `/product/*` child nodes.** d47ap carries three
+sibling nodes to `/product/camera`. vphone600 has none of them.
+
+| Node | Props | Camera relevance |
+|------|:-----:|------------------|
+| `/product/facetime` | 9 (excl. AAPL,phandle) | Front-camera video-call config — bitrates, codec encoding/decoding, tnr-mode-back/front. |
+| `/product/audio` | 31 (excl. AAPL,phandle) | Carries `supports-spatial-audio-capture=1` + `supports-spatial-facetime=1` (camera-joint). Rest is audio config. |
+| `/product/iopm` | 2 (excl. AAPL,phandle) | `aot-mode=13` + `aot-linger-time-ms=0`. Always-On Technology mode. |
+
+All property values copied byte-for-byte from
+`ipsws/iPhone17,3_26.5_23F77_Restore_extracted/Firmware/all_flash/DeviceTree.d47ap.im4p`.
+
+**Tier F — `/arm-io/*` minimal camera-flag stubs.** d47ap carries
+`/arm-io/isp` (65 props), `/arm-io/ispRtb` (53 props), and a deep
+`/arm-io/smc/iop-smc-nub/smc-ext-charger` chain (3 levels of node).
+vphone600 has none of these paths. We add minimal stub nodes carrying
+ONLY the camera-* properties and the mandatory auto-`name`,
+deliberately omitting `compatible`/`device_type`/`reg`/`interrupts`,
+so no IOKit kext finds a matching `compatible=` and tries to probe
+non-existent ISP / SMC hardware.
+
+| Path | Property | Value |
+|------|----------|-------|
+| `/arm-io/smc` | (stub — parent for chain) | — |
+| `/arm-io/smc/iop-smc-nub` | (stub — parent for charger) | — |
+| `/arm-io/smc/iop-smc-nub/smc-ext-charger` | `camera-driver` | str `'AppleH16CamIn'` |
+| `/arm-io/isp` | `camera-front`, `camera-rear` | int32:1, int32:1 |
+| `/arm-io/ispRtb` | `camera-front`, `camera-rear` | int32:1, int32:1 |
+
+Dependency order: the patcher walks `experimentalNodeAdditions` in
+array order against the in-memory tree, so each entry that resolves
+to a parent added by an earlier entry resolves correctly.
+
+Idempotent: re-running the patcher against an already-modified DT
+detects the existing child by name and skips. The DT IM4P that ships
+on subsequent boots is signed by Apple but the existing iBSS/iBEC/LLB
+`image4_validate_property_callback` bypass accepts arbitrary payloads.
 
 ### Post-restore DT identity rewrite (EXP-JB-6, EXP only)
 
@@ -513,6 +653,7 @@ cache rebuild.
 | BaseBin hook deployment (`*.dylib` -> `/mnt1/cores`) | -                        | -                          | Y (JB-3)                                      | Y (JB-3)                                              |
 | First-boot JB finalization (`vphone_jb_setup.sh`) | -                           | -                          | Y (post-boot)                                 | Y (post-boot)                                         |
 | DSC pre-patch (`kern.hv_vmm_present` byte-5 mangle + slot reattest) | -         | -                          | -                                             | Y (pre-step, before base CFW)                         |
+| DSC camera patches (12 patches across CMCapture / CoreMediaIO / AVFCapture / libMobileGestalt) | - | -                  | -                                             | Y (pre-step, same cryptex mount as hv_vmm)            |
 | `watchdogd` surgical 2-insn patch + slot reattest | -                           | -                          | -                                             | Y (EXP-JB-3.5)                                        |
 | Post-restore DT identity rewrite (`devicetree.img4`)| -                         | -                          | -                                             | Y (EXP-JB-6)                                          |
 | `SystemVersion.plist` `ProductBuildVersion` rewrite | -                         | -                          | -                                             | Y (EXP-JB-7, opt-in via `SPOOF_BUILD`)                |
@@ -534,12 +675,13 @@ cache rebuild.
 | Kernel (EXP methods, `hv_vmm`)     |       - |   - |   - |   6 |
 | DeviceTree base properties         |       4 |   4 |   4 |   4 |
 | DeviceTree EXP identity properties |       - |   - |   - |   8 |
-| Boot chain total                   |      46 |  58 | 117 | 131 |
+| DeviceTree EXP node additions      |       - |   - |   - |   1 (`/product/camera`) |
+| Boot chain total                   |      46 |  58 | 117 | 132 |
 | CFW binary patches (base)          |       4 |   5 |   6 |   6 |
-| CFW EXP-only steps                 |       - |   - |   - |   4 (DSC pre-patch, watchdogd EXP-JB-3.5, post-restore DT EXP-JB-6, build-version EXP-JB-7 opt-in) |
+| CFW EXP-only steps                 |       - |   - |   - |   5 (hv_vmm DSC, camera DSC ×12, watchdogd EXP-JB-3.5, post-restore DT EXP-JB-6, build-version EXP-JB-7 opt-in) |
 | CFW installed components           |       6 |   7 |   9 |   9 |
-| CFW total                          |      10 |  12 |  15 |  19 |
-| Grand total                        |      56 |  70 | 132 | 150 |
+| CFW total                          |      10 |  12 |  15 |  31 |
+| Grand total                        |      56 |  70 | 132 | 163 |
 
 ## Ramdisk Variant Matrix
 
@@ -613,7 +755,7 @@ cache rebuild.
   - dev: all 7 component payloads match
   - jb: all 7 component payloads match
 - Runtime validation blocker observed on 2026-03-10:
-  - `NONE_INTERACTIVE=1 SKIP_PROJECT_SETUP=1 make setup_machine JB=1` reaches the Swift patch stage and reports `[patch-firmware] applied 154 patches for jb`, then fails when the flow transitions into `make boot_dfu`.
+  - `NON_INTERACTIVE=1 SKIP_PROJECT_SETUP=1 make setup_machine JB=1` reaches the Swift patch stage and reports `[patch-firmware] applied 154 patches for jb`, then fails when the flow transitions into `make boot_dfu`.
   - `make boot_dfu` originally failed at launch-policy time with exit `137` / signal `9` because the release `vphone-cli` could not launch on this host.
   - `amfidont` was then validated on-host:
     - it can attach to `/usr/libexec/amfid`
@@ -769,3 +911,80 @@ cache rebuild.
   - removed ad-hoc `git clone` source fetching from `scripts/setup_tools.sh` and `scripts/setup_libimobiledevice.sh`.
   - added pinned git-submodule sources under `scripts/repos/` for: `trustcache`, `insert_dylib`, `libplist`, `libimobiledevice-glue`, `libusbmuxd`, `libtatsu`, `libimobiledevice`, `libirecovery`, `idevicerestore`.
   - setup scripts now initialize required submodules via `git submodule update --init --recursive <path>` and stage build copies under local tool build directories.
+- 2026-06-15 cloudOS 26.5 (23F77) JB retargeting — P0 (sudo/setuid):
+  - **JB-04 `patch_hook_cred_label_update_execve` (P0, sudo/setuid) — FIXED.**
+    Root cause: `findVfsContextCurrentByShape()` pinned a 5-word prologue ending
+    in `ldr x1, [x0, #0x3E0]`; the uthread offset drifted to `#0x3F0` on 26.5
+    (`0x3E8` on macOS 26.5.1 KDK), so the exact match returned 0 hits.
+    Fix: resolve `vfs_context_current` generically — symbol first, else the stable
+    4-word prologue prefix (`pacibsp; stp x29,x30,[sp,#-0x10]!; mov x29,sp;
+    mrs x0,tpidr_el1`) followed by *any* `ldr x1,[x0,#imm]` (imm left unpinned);
+    uniqueness still required. Reveal: on the decompressed kernelcache the prefix
+    matches 5 sites, exactly one followed by an `ldr x1,[x0,#imm]` →
+    `vfs_context_current` @ va `0x8D7F39C` (foff `0x1D7B39C`). Validated via
+    `make test_jb_patches`: both `jb.hook_cred_label.{ops_retarget,c23_cave}` emit.
+  - Symbol oracle for the above: macOS 26.5.1 KDK (`KDK_26.5.1_25F80`) —
+    `kernel.release.vmapple` + `Sandbox.kext`/`AMFI.kext` (arm64e) carry full nlist
+    symbol tables for the XNU/Sandbox functions stripped from the vphone600 cache.
+  - Remaining 26.5 JB failures (8) still open: `task_conversion_eval` (inlined),
+    `proc_security_policy` + `proc_pidinfo` (shared `_proc_info` switch refactored,
+    `cmp #0x21` bound gone), `io_secure_bsd_root` (iOS-only, absent from KDK),
+    `mac_mount`, `spawn_validate_persona` (iOS-only), `vm_map_protect`,
+    `kcall10`/`sysent`.
+- 2026-06-16 cloudOS 26.5 (23F77) JB retargeting — the 8 remaining P1 failures, all FIXED.
+  Ground truth: IDA (idasql) on the decompressed `kernelcache.research.vphone600`,
+  symbolicated via the macOS KDK oracle; XNU source cross-check. Validation:
+  `make test_jb_patches` → every supported cloudOS kernel applies with **0** `[-]`
+  failures (84 patches each). All anchors are version-independent
+  (semantic/Capstone/call-graph), no pinned offsets/indices.
+  - **JB-11 `proc_security_policy` + JB-12 `proc_pidinfo` (shared root cause).**
+    The `sub wN,wM,#1 ; cmp wN,#0x21` switch anchor matched TWO sites on 26.5; the
+    naive first-match grabbed the wrong one (`decodeWakeReason`, lower address).
+    Replaced the whole `findProcInfoAnchor` with two source-backed finders in
+    `KernelJBPatcherBase.swift`: `findProcSecurityPolicy()` locates the unique
+    function that loads `PRIV_GLOBAL_PROC_INFO` (1002 = `0x3EA`, a stable
+    `bsd/sys/priv.h` ABI value) into `w1` ahead of `priv_check_cred` →
+    `_proc_security_policy` @ va `0x927E330` (stub entry `mov x0,#0; ret`);
+    `findProcInfoInternal()` = its sole caller via `blIndex` → `_proc_info_internal`
+    @ `0x927B38C` (proc_pidinfo is now inlined there). proc_pidinfo NOPs the unique
+    `ldr x0,[x0,#0x18]; cbz x0; bl; cbz/cbnz wN; mov w0,#0x16(EINVAL); sub wN,wM,#1`
+    guard pair → `0x927BDA8` / `0x927BDB0`.
+  - **JB-08 `task_conversion_eval_internal`.** Inlined; recovered via the unique
+    `"…pineapple on pizza…"` panic-string function (`task_get_special_port_from_user`).
+    The 26.1 matcher failed only because the compare operands swapped
+    (`cmp x0,x9` vs `cmp x9,x0`). Rewrote `collectTaskConversionCandidates` to accept
+    the kernel_task-vs-{X0,X1} compare in EITHER operand order. Unique hit
+    `cmp x0,x9 → cmp xzr,xzr` @ va `0x8D087A8`.
+  - **JB-?? `io_secure_bsd_root`.** `AppleARMPE::callPlatformFunction` (refs both
+    `"SecureRoot"`+`"SecureRootName"`). The match-bit compare-context moved >0xA0 back
+    (sync code inserted), breaking the old lookback. Re-anchored on the unique
+    `csel Wd,wzr,Wn,<cond>` whose `Wn` is built as `kIOReturnNotPrivileged`
+    (`movk Wn,#0xE000,lsl#16` — IOKit error high half). `csel w22,wzr,w9,ne →
+    mov w22,#0` @ va `0x7B30E10`. Dropped the pinned `[x19,#0x11A]` field offset.
+  - **JB-?? `mac_mount`.** Wrapper still uniquely identified by the twin gates among
+    `mount_common` callers (`__mac_mount` @ `0x8EC04F0`). Site 1 (`tbnz wFlags,#5 →
+    mov w?,#1` preboot reject) unchanged → NOP @ `0x8EC06FC`. Site 2 folded on 26.5:
+    `add x?,#0x70 ; ldrb w8,[x?,#1] ; tbz w8,#6` → `ldrb w8,[x16,#0x71] ; tbnz w8,#6`.
+    Re-anchored `findStateGate` on the `ldrb wN,[x,#imm] ; tbz/tbnz wN,#6` pair (the
+    `#6` role bit is the stable semantic) and clear the loaded reg → `mov x8,xzr`
+    @ `0x8EC072C`.
+  - **JB-?? `spawn_validate_persona`** @ `0x91C0D4C` (reached from the spawn
+    entitlement wrapper, intact). The trailing `mov x?,#0 ; ldr x?,[x?,#0x490] ; casa`
+    corroboration lowered differently on 26.5; re-anchored `matchPersonaHelper` on the
+    dual sibling reject `ldr [base,#8];cbz / ldr [base,#0xc];cbz` (same base + same
+    deny target + deny `mov w?,#1`), preceded by the `[_,#0x18]` sibling guard. NOP
+    both cbz → `0x91C0DF8` / `0x91C0E00`.
+  - **JB-25 `vm_map_protect`** @ `0x8DCA0A8`. The 26.1 `mov #6;bics;b.ne;tbnz#22;and
+    #~X` block was recompiled; the per-entry apply path now narrows protection with a
+    runtime W^X mask register before `pmap_protect_options`
+    (`lsr wT,wFlags,#7 ; and w3,wT,wMask`, `mov wMask,#5`). Widening the mask `#5 → #7`
+    makes the AND a pass-through so the requested protection (incl. the stripped bit)
+    reaches the pmap — strictly permissive (`prot&7 ⊇ prot&5`). `mov w27,#5 → mov
+    w27,#7` @ `0x8DCA30C`.
+  - **JB-?? `kcall10` / sysent.** `findNosys()` matched an unrelated tiny
+    `mov w0,#0x4e; ret` stub; the real `_nosys` is a large handler the sysent rows
+    actually point to (112/558 entries). Rewrote `findSysentTable()` to find the table
+    STRUCTURALLY (no `_nosys` dependency): the longest run of valid 24-byte `sysent`
+    rows (chained auth-rebase `sy_call` into __TEXT_EXEC + sane
+    `sy_return_type/sy_narg/sy_arg_bytes`). Base @ foff `0x7693B0` (558 rows);
+    `sysent[439]` (`SYS_kas_info`) @ foff `0x76BCD8`; cave + 3 entry writes emit.
