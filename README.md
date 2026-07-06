@@ -325,9 +325,22 @@ queries, and the userspace TCP relay) runs as root. The helper is told the
 parent's pid via `WATCH_PID`, so if vphone-cli exits or crashes the helper tears
 the `pf` anchor down on its own — no launchd, no leftover rules.
 
+The same helper also serves **guest DNS**. The pf redirect only captures TCP, so
+name resolution would otherwise be left to the shared-network gateway — which, in
+the VPN environment this workaround exists for, has nothing answering `:53`, so
+every lookup hangs and apps read as "no network" even though bare-IP TCP works.
+The helper runs a userspace forwarder on `<bridge>:53` (UDP + TCP) that relays to
+whatever resolver the *host* is currently using; being a host process, it reaches
+the corp resolver through the same VPN. The upstream is re-read on a short TTL, so
+a host Wi-Fi/VPN switch is picked up automatically. If something already answers
+`:53` on the bridge the forwarder logs the bind conflict and steps aside (the TCP
+relay is unaffected); set `ENABLE_DNS=0` to opt out entirely. See
+`research/tcp_workaround_guest_dns_forwarder.md`.
+
 Notes:
 
-- This workaround only proxies IPv4 TCP. It does not repair UDP / QUIC traffic.
+- This workaround proxies IPv4 TCP and serves IPv4 DNS (UDP + TCP). It does not
+  repair other UDP / QUIC traffic.
 - The helper inherits the same auto-detection used by the older standalone
   scripts; on a non-standard host you can still override `LISTEN_ADDR` /
   `PF_INTERFACE` via env vars.

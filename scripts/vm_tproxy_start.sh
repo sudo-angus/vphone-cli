@@ -18,6 +18,12 @@ LISTEN_ADDR="${LISTEN_ADDR:-}"
 PF_INTERFACE="${PF_INTERFACE:-}"
 PID_FILE="${PID_FILE:-/tmp/${ANCHOR}.pid}"
 CONNECT_TIMEOUT="${CONNECT_TIMEOUT:-30}"
+# Guest DNS forwarder on the bridge IP:53. On by default because the guest's
+# DHCP-issued resolver points at the bridge, which otherwise has nothing
+# answering :53 (the pf rdr below only captures TCP). Set ENABLE_DNS=0 to
+# disable — e.g. an environment where native shared-network DNS already works.
+ENABLE_DNS="${ENABLE_DNS:-1}"
+DNS_PORT="${DNS_PORT:-53}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 WATCH_PID="${WATCH_PID:-}"
 WATCH_INTERVAL="${WATCH_INTERVAL:-2}"
@@ -344,10 +350,18 @@ start() {
 
     echo "[tproxy] pf anchor loaded. starting proxy..."
     trap 'cleanup $?' EXIT INT TERM
+    local dns_args
+    if is_truthy "$ENABLE_DNS"; then
+        dns_args=(--dns --dns-port "$DNS_PORT")
+        echo "[tproxy] guest DNS forwarder enabled on $LISTEN_ADDR:$DNS_PORT"
+    else
+        dns_args=(--no-dns)
+    fi
     "$PYTHON_BIN" "$SCRIPT_DIR/vm_tproxy.py" \
         --listen-addr "$LISTEN_ADDR" \
         --listen-port "$LISTEN_PORT" \
-        --connect-timeout "$CONNECT_TIMEOUT" &
+        --connect-timeout "$CONNECT_TIMEOUT" \
+        "${dns_args[@]}" &
     proxy_pid="$!"
     echo "$proxy_pid" >"$PID_FILE"
 

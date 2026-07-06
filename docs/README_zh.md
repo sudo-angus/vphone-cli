@@ -250,9 +250,20 @@ helper；bridge 探测仍留在 `scripts/vm_tproxy_start.sh` 里，和手动路�
 通过 `WATCH_PID` 监听父进程，一旦 vphone-cli 退出或崩溃，它会自行拆掉 `pf`
 anchor —— 不依赖 launchd，也不会留下残余规则。
 
+同一个 helper 还会**代理 guest DNS**。pf 重定向只抓 TCP，域名解析本会交给
+共享网络的网关处理——而在这个绕行方案针对的 VPN 环境里，网关的 `:53` 上根本
+没有 DNS 服务应答，于是每次查询都卡死，裸 IP TCP 明明能通、app 却表现成
+「没有网络」。helper 会在 `<bridge>:53`（UDP + TCP）上跑一个用户态转发器，把
+查询转发到**宿主机当前使用的** resolver；作为宿主机进程，它经由同一条 VPN
+就能到达公司 DNS。上游 resolver 以短 TTL 重新读取，所以宿主机切换 Wi-Fi/VPN
+后会自动跟上。如果网关的 `:53` 已经有别的服务在应答，转发器会记录 bind 冲突
+并让路（TCP 转发不受影响）；设 `ENABLE_DNS=0` 可整体关闭。详见
+`research/tcp_workaround_guest_dns_forwarder.md`。
+
 注意：
 
-- 这个绕行方案只代理 IPv4 TCP，不处理 UDP / QUIC。
+- 这个绕行方案代理 IPv4 TCP，并提供 IPv4 DNS（UDP + TCP），不处理其它
+  UDP / QUIC 流量。
 - helper 沿用旧版独立脚本的自动探测逻辑；少数特殊网络环境下，仍可以通过
   `LISTEN_ADDR` / `PF_INTERFACE` 环境变量手动覆盖。
 - 如果 helper 已经在跑，`vphone-cli` 集成路径会在启动时替换它，让每次 boot
