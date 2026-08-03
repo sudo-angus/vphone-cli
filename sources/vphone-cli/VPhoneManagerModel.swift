@@ -7,6 +7,7 @@ enum VPhoneManagerError: LocalizedError {
     case exportFailed(Int)
     case amfidontMissing
     case sudoersInvalid(String)
+    case sudoersInstallFailed(String)
     case authorizationCancelled
     case authorizationFailed(String)
 
@@ -17,6 +18,11 @@ enum VPhoneManagerError: LocalizedError {
         case .amfidontMissing:
             "amfidont is not installed for any python3 on this host. Install it with: xcrun python3 -m pip install -U amfidont"
         case let .sudoersInvalid(detail): "Generated sudoers rule failed validation: \(detail)"
+        case let .sudoersInstallFailed(detail):
+            // The whole-config `visudo -c` rejected the system's sudoers after
+            // install, so our rule was rolled back. Almost always a pre-existing
+            // bad drop-in (often MDM/管控-installed), not our file — point there.
+            "Could not install the sudoers rule: the system sudoers configuration failed validation and the change was rolled back. This usually means /etc/sudoers or another file in /etc/sudoers.d is already invalid (common on MDM-managed Macs). Run `sudo visudo -c` in Terminal to find the offending file.\n\n\(detail)"
         case .authorizationCancelled: "Authorization was cancelled."
         case let .authorizationFailed(detail): "Authorization failed: \(detail)"
         }

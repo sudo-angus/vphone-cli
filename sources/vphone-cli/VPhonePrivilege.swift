@@ -61,10 +61,39 @@ final class VPhonePrivilege {
 
         // One elevated step: install with strict perms, then re-validate the
         // whole config and roll back if anything is wrong.
+        //
+        // `visudo -c` checks *all* of /etc/sudoers + /etc/sudoers.d, so a
+        // pre-existing bad drop-in (common on MDM-managed Macs) fails it even
+        // though our file just passed `visudo -cf` above. `do shell script`
+        // only bubbles up the command's exit code, swallowing visudo's actual
+        // complaint — leaving the GUI with an opaque "(2)". So capture both
+        // install's and visudo's output to a user-readable log and surface it
+        // on failure instead.
         let dest = sudoersPath
-        let install = "/usr/bin/install -m 0440 -o root -g wheel \(Self.shq(tmp.path)) \(Self.shq(dest))"
-        let verify = "/usr/sbin/visudo -c >/dev/null 2>&1 || (/bin/rm -f \(Self.shq(dest)); exit 2)"
-        try await Self.runAdminShell("\(install) && (\(verify))")
+        let errLog = FileManager.default.temporaryDirectory
+            .appendingPathComponent("vphone-visudo-\(UUID().uuidString).log")
+        defer { try? FileManager.default.removeItem(at: errLog) }
+
+        let logPath = Self.shq(errLog.path)
+        let script = """
+        { /usr/bin/install -m 0440 -o root -g wheel \(Self.shq(tmp.path)) \(Self.shq(dest)) \
+        && /usr/sbin/visudo -c ; } > \(logPath) 2>&1 ; rc=$? ; \
+        /bin/chmod 0644 \(logPath) 2>/dev/null ; \
+        [ $rc -eq 0 ] || { /bin/rm -f \(Self.shq(dest)) ; exit 2 ; }
+        """
+
+        do {
+            try await Self.runAdminShell(script)
+        } catch VPhoneManagerError.authorizationCancelled {
+            throw VPhoneManagerError.authorizationCancelled
+        } catch {
+            // The elevated step failed (install or visudo). The real message
+            // was captured to errLog as root, then chmod'd readable; prefer it
+            // over osascript's opaque exit-code error.
+            let detail = (try? String(contentsOf: errLog, encoding: .utf8))?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            throw detail.isEmpty ? error : VPhoneManagerError.sudoersInstallFailed(detail)
+        }
     }
 
     func deauthorize() async throws {
