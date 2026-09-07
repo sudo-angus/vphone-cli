@@ -1,4 +1,5 @@
 import Foundation
+import VPhoneCore
 
 /// Discovers and describes the VM directories the manager presents as a
 /// library. A VM is any directory containing a `config.plist`. Two roots are

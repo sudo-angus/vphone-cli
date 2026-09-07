@@ -14,6 +14,7 @@ from pymobiledevice3.exceptions import (
     ConnectionFailedToUsbmuxdError,
     IRecvNoDeviceConnectedError,
     IncorrectModeError,
+    PairingError,
 )
 from pymobiledevice3.irecv import IRecv
 from pymobiledevice3.lockdown import create_using_usbmux
@@ -21,6 +22,35 @@ from pymobiledevice3.restore.device import Device
 from pymobiledevice3.restore.recovery import Behavior, Recovery
 from pymobiledevice3.restore.restore import Restore
 import typer
+
+
+# pymobiledevice3's own CLI installs coloredlogs at INFO (see its __main__) and
+# silences these chatty third-party loggers. Mirror that here so the bridge's
+# restore output is the same colorized log stream when run with -v.
+_NOISY_LOGGERS = (
+    "quic",
+    "asyncio",
+    "parso.cache",
+    "parso.cache.pickle",
+    "parso.python.diff",
+    "humanfriendly.prompts",
+    "blib2to3.pgen2.driver",
+    "urllib3.connectionpool",
+)
+
+
+def install_logging(verbose: int) -> None:
+    import logging
+
+    level = [logging.WARNING, logging.INFO, logging.DEBUG][min(verbose, 2)]
+    try:
+        import coloredlogs
+
+        coloredlogs.install(level=level)
+    except ImportError:
+        logging.basicConfig(level=level)
+    for name in _NOISY_LOGGERS:
+        logging.getLogger(name).disabled = True
 
 
 def parse_ecid(value: Optional[str]) -> Optional[int]:
@@ -66,7 +96,7 @@ async def resolve_device(ecid: Optional[int], udid: Optional[str]) -> Device:
 
         try:
             lockdown = await create_using_usbmux(serial=usb_device.serial, connection_type="USB")
-        except (ConnectionFailedError, IncorrectModeError):
+        except (ConnectionFailedError, IncorrectModeError, PairingError):
             continue
 
         lockdown_ecid = int(str(lockdown.ecid), 0)
@@ -104,78 +134,6 @@ def wait_for_irecv(ecid: Optional[int], timeout: int, is_recovery: Optional[bool
     mode_label = "recovery" if is_recovery else "dfu/recovery"
     raise TimeoutError(f"Timed out waiting for {mode_label} endpoint")
 
-
-def irecv_send_file(irecv: IRecv, image_path: Path) -> None:
-    data = image_path.read_bytes()
-    irecv.send_buffer(data)
-
-
-def resolve_kernel_image(ramdisk_dir: Path) -> Path:
-    ramdisk_variant = ramdisk_dir / "krnl.ramdisk.img4"
-    if ramdisk_variant.exists():
-        return ramdisk_variant
-    default_kernel = ramdisk_dir / "krnl.img4"
-    if default_kernel.exists():
-        return default_kernel
-    raise FileNotFoundError(f"Kernel image not found in {ramdisk_dir}")
-
-
-def cmd_ramdisk_send(ecid: Optional[int], ramdisk_dir: Path, timeout: int) -> None:
-    if not ramdisk_dir.is_dir():
-        raise FileNotFoundError(f"Ramdisk directory not found: {ramdisk_dir}")
-
-    kernel_img = resolve_kernel_image(ramdisk_dir)
-
-    print(f"[*] Sending ramdisk from {ramdisk_dir}")
-    if kernel_img.name == "krnl.ramdisk.img4":
-        print("  [*] Using ramdisk kernel variant: krnl.ramdisk.img4")
-
-    irecv = wait_for_irecv(ecid, timeout=timeout, is_recovery=False)
-
-    # 1) DFU stage: iBSS + iBEC, then switch to recovery.
-    print("  [1/8] Loading iBSS...")
-    irecv_send_file(irecv, ramdisk_dir / "iBSS.vresearch101.RELEASE.img4")
-
-    print("  [2/8] Loading iBEC...")
-    irecv_send_file(irecv, ramdisk_dir / "iBEC.vresearch101.RELEASE.img4")
-    irecv.send_command("go", b_request=1)
-    time.sleep(1)
-
-    print("  [*] Waiting for device to reconnect in recovery...")
-    irecv = wait_for_irecv(ecid, timeout=timeout, is_recovery=True)
-    print("  [*] Reconnected in recovery")
-
-    # 2) Recovery stage payload chain.
-    print("  [3/8] Loading SPTM...")
-    irecv_send_file(irecv, ramdisk_dir / "sptm.vresearch1.release.img4")
-    irecv.send_command("firmware")
-
-    print("  [4/8] Loading TXM...")
-    irecv_send_file(irecv, ramdisk_dir / "txm.img4")
-    irecv.send_command("firmware")
-
-    print("  [5/8] Loading trustcache...")
-    irecv_send_file(irecv, ramdisk_dir / "trustcache.img4")
-    irecv.send_command("firmware")
-
-    print("  [6/8] Loading ramdisk...")
-    irecv_send_file(irecv, ramdisk_dir / "ramdisk.img4")
-    time.sleep(2)
-    irecv.send_command("ramdisk")
-
-    print("  [7/8] Loading device tree...")
-    irecv_send_file(irecv, ramdisk_dir / "DeviceTree.vphone600ap.img4")
-    irecv.send_command("devicetree")
-
-    print("  [8/8] Loading SEP...")
-    irecv_send_file(irecv, ramdisk_dir / "sep-firmware.vresearch101.RELEASE.img4")
-    irecv.send_command("firmware")
-
-    print("  [*] Booting kernel...")
-    irecv_send_file(irecv, kernel_img)
-    irecv.send_command("bootx", b_request=1)
-
-    print("[+] Boot sequence complete. Device should be booting into ramdisk.")
 
 
 def derive_shsh_output(vm_dir: Path, ecid: Optional[int]) -> Path:
@@ -247,21 +205,6 @@ def recovery_probe_command(
     wait_for_irecv(parsed_ecid, timeout=timeout)
 
 
-@app.command("ramdisk-send", help="Send ramdisk chain over irecv")
-def ramdisk_send_command(
-    ecid: Optional[str] = typer.Option(None, help="Hex ECID (with/without 0x)"),
-    timeout: int = typer.Option(90, help="Send timeout in seconds"),
-    ramdisk_dir: Path = typer.Option(
-        Path("Ramdisk"),
-        help="Ramdisk directory",
-        exists=False,
-        file_okay=False,
-        dir_okay=True,
-    ),
-) -> None:
-    cmd_ramdisk_send(require_ecid(ecid), ramdisk_dir, timeout)
-
-
 @app.command("restore-get-shsh", help="Fetch SHSH from prepared restore dir")
 def restore_get_shsh_command(
     vm_dir: Path = typer.Option(
@@ -280,7 +223,11 @@ def restore_get_shsh_command(
         file_okay=True,
         dir_okay=False,
     ),
+    verbose: int = typer.Option(
+        0, "--verbose", "-v", count=True, help="Increase log verbosity (-v info, -vv debug)."
+    ),
 ) -> Awaitable[None]:
+    install_logging(verbose)
     return cmd_restore_get_shsh(vm_dir, require_ecid(ecid), udid, out)
 
 
@@ -303,7 +250,11 @@ def restore_update_command(
         file_okay=True,
         dir_okay=False,
     ),
+    verbose: int = typer.Option(
+        0, "--verbose", "-v", count=True, help="Increase log verbosity (-v info, -vv debug)."
+    ),
 ) -> Awaitable[None]:
+    install_logging(verbose)
     return cmd_restore_update(vm_dir, require_ecid(ecid), udid, erase=erase, tss_path=tss)
 
 

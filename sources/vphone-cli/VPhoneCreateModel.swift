@@ -47,7 +47,7 @@ final class VPhoneCreateModel: Identifiable {
 
     let registry: VPhoneVMRegistry
     let privilege: VPhonePrivilege
-    let catalog: VPhoneFirmwareCatalog
+    let catalog: VPhoneMakeFirmwareCatalog
     let engine = VPhoneCreateEngine()
 
     var name = "vPhone"
@@ -62,7 +62,7 @@ final class VPhoneCreateModel: Identifiable {
     init(registry: VPhoneVMRegistry, privilege: VPhonePrivilege) {
         self.registry = registry
         self.privilege = privilege
-        catalog = VPhoneFirmwareCatalog(repoRoot: registry.repoRoot)
+        catalog = VPhoneMakeFirmwareCatalog(repoRoot: registry.repoRoot)
     }
 
     /// Authorize the create-time `hdiutil` elevation if needed, then kick off

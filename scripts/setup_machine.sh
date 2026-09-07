@@ -5,16 +5,9 @@
 # 1) Host deps + project setup/build
 # 2) vm_new + fw_prepare + fw_patch (or fw_patch_dev/ fw_patch_jb with --dev/--jb)
 # 3) DFU restore (boot_dfu + restore_get_shsh + restore)
-# 4) Ramdisk + CFW (boot_dfu + ramdisk_build + ramdisk_send + iproxy + cfw_install / cfw_install_dev / cfw_install_jb)
+# 4) CFW install — host-mount install + offline snapshot flip
+#    (cfw_install_host, VM off)
 # 5) First boot launch (`make boot`) with printed in-guest commands
-#
-# --phase splits the run into two halves at the natural DFU stop/start
-# boundary between (3) and (4). The default --phase=all keeps the original
-# single-shot behavior; --phase=prep stops after (3); --phase=install
-# resumes from (4) and assumes prep already produced fw artifacts in vm/.
-# This lets you reboot the host between the two halves when long ldid /
-# DMG / AMFI activity wedges system daemons (mds, syspolicyd, amfid, etc.)
-# without re-doing the multi-GB firmware download/patch/restore.
 
 set -euo pipefail
 
@@ -25,11 +18,9 @@ cd "$PROJECT_ROOT"
 
 LOG_DIR="${PROJECT_ROOT}/setup_logs"
 DFU_LOG="${LOG_DIR}/boot_dfu.log"
-IPROXY_LOG=""
 BOOT_LOG="${LOG_DIR}/boot.log"
 
 DFU_PID=""
-IPROXY_PID=""
 BOOT_PID=""
 BOOT_FIFO=""
 BOOT_FIFO_FD=""
@@ -40,23 +31,9 @@ VM_DIR_ABS="${VM_DIR:A}"
 AUTO_KILL_VM_LOCKS="${AUTO_KILL_VM_LOCKS:-1}"
 POST_RESTORE_KILL_DELAY="${POST_RESTORE_KILL_DELAY:-30}"
 POST_KILL_SETTLE_DELAY="${POST_KILL_SETTLE_DELAY:-5}"
-RAMDISK_SSH_TIMEOUT="${RAMDISK_SSH_TIMEOUT:-60}"
-RAMDISK_SSH_INTERVAL="${RAMDISK_SSH_INTERVAL:-2}"
-RAMDISK_SSH_PORT="${RAMDISK_SSH_PORT:-}"
-RAMDISK_SSH_USER="${RAMDISK_SSH_USER:-root}"
-RAMDISK_SSH_PASS="${RAMDISK_SSH_PASS:-alpine}"
-IPROXY_UDID="${IPROXY_UDID:-}"
-IPROXY_DEVICE_WAIT_TIMEOUT="${IPROXY_DEVICE_WAIT_TIMEOUT:-90}"
-IPROXY_DEVICE_WAIT_INTERVAL="${IPROXY_DEVICE_WAIT_INTERVAL:-1}"
-RAMDISK_SSH_PORT_EXPLICIT=0
-if [[ -n "$RAMDISK_SSH_PORT" ]]; then
-  RAMDISK_SSH_PORT_EXPLICIT=1
-fi
 
 DEVICE_UDID=""
 DEVICE_ECID=""
-IPROXY_TARGET_UDID=""
-IPROXY_RESOLVE_REASON=""
 BOOT_ANALYSIS_TIMEOUT="${BOOT_ANALYSIS_TIMEOUT:-300}"
 BOOT_PROMPT_FALLBACK_TIMEOUT="${BOOT_PROMPT_FALLBACK_TIMEOUT:-60}"
 BOOT_BASH_PROMPT_REGEX="${BOOT_BASH_PROMPT_REGEX:-bash-[0-9]+(\.[0-9]+)+#|:/[^ ]* root#}"
@@ -73,7 +50,6 @@ DEV_MODE=0
 EXP_MODE=0
 LESS_MODE=0
 SKIP_PROJECT_SETUP=0
-PHASE="all"
 
 die() {
   echo "[-] $*" >&2
@@ -153,174 +129,6 @@ load_device_identity() {
     || die "UDID/ECID mismatch in ${prediction_file}: ${DEVICE_UDID} vs 0x${DEVICE_ECID}"
 
   echo "[+] Device identity loaded: UDID=${DEVICE_UDID} ECID=0x${DEVICE_ECID}"
-}
-
-list_usbmux_udids() {
-  local pmd3_python
-  pmd3_python="$(find_python_for_pmd3 || true)"
-  [[ -x "$pmd3_python" ]] || die "pymobiledevice3 python runtime not found (run: make setup_tools)"
-  [[ -f "$PMD3_BRIDGE" ]] || die "Missing bridge script: $PMD3_BRIDGE"
-  "$pmd3_python" "$PMD3_BRIDGE" usbmux-list 2>/dev/null | tr -d '\r' | sed '/^[[:space:]]*$/d'
-}
-
-print_usbmux_udids() {
-  local -a udids
-  local udid
-  udids=(${(@f)$(list_usbmux_udids)})
-
-  if (( ${#udids[@]} == 0 )); then
-    echo "    (none)"
-    return
-  fi
-
-  for udid in "${udids[@]}"; do
-    echo "    - ${udid}"
-  done
-}
-
-try_resolve_iproxy_target_udid() {
-  local -a usbmux_udids ecid_matches
-  local udid
-  local ecid_lower
-
-  IPROXY_TARGET_UDID=""
-  IPROXY_RESOLVE_REASON=""
-
-  if [[ -n "$IPROXY_UDID" ]]; then
-    IPROXY_TARGET_UDID="$IPROXY_UDID"
-    IPROXY_RESOLVE_REASON="override"
-    return 0
-  fi
-
-  usbmux_udids=(${(@f)$(list_usbmux_udids)})
-  if (( ${#usbmux_udids[@]} == 0 )); then
-    IPROXY_RESOLVE_REASON="none"
-    return 1
-  fi
-
-  for udid in "${usbmux_udids[@]}"; do
-    if [[ "$udid" == "$DEVICE_UDID" ]]; then
-      IPROXY_TARGET_UDID="$udid"
-      IPROXY_RESOLVE_REASON="restore_match"
-      return 0
-    fi
-  done
-
-  ecid_lower="${DEVICE_ECID:l}"
-  ecid_matches=()
-  for udid in "${usbmux_udids[@]}"; do
-    if [[ "${udid:l}" == *"${ecid_lower}"* ]]; then
-      ecid_matches+=("$udid")
-    fi
-  done
-
-  if (( ${#ecid_matches[@]} == 1 )); then
-    IPROXY_TARGET_UDID="${ecid_matches[1]}"
-    IPROXY_RESOLVE_REASON="ecid_match"
-    return 0
-  fi
-
-  if (( ${#usbmux_udids[@]} == 1 )); then
-    IPROXY_RESOLVE_REASON="single_mismatch"
-    return 3
-  fi
-
-  IPROXY_RESOLVE_REASON="ambiguous"
-  return 2
-}
-
-wait_for_iproxy_target_udid() {
-  local timeout interval waited rc
-
-  timeout="$IPROXY_DEVICE_WAIT_TIMEOUT"
-  interval="$IPROXY_DEVICE_WAIT_INTERVAL"
-  waited=0
-
-  [[ "$timeout" == <-> ]] || die "IPROXY_DEVICE_WAIT_TIMEOUT must be an integer (seconds)"
-  [[ "$interval" == <-> ]] || die "IPROXY_DEVICE_WAIT_INTERVAL must be an integer (seconds)"
-  (( timeout > 0 )) || die "IPROXY_DEVICE_WAIT_TIMEOUT must be > 0"
-  (( interval > 0 )) || die "IPROXY_DEVICE_WAIT_INTERVAL must be > 0"
-
-  echo "[*] Resolving iproxy target UDID (timeout=${timeout}s)..."
-  while (( waited < timeout )); do
-    if try_resolve_iproxy_target_udid; then
-      echo "[*] USBMux IDs currently visible:"
-      print_usbmux_udids
-      case "$IPROXY_RESOLVE_REASON" in
-        override)
-          echo "[*] Using explicit IPROXY_UDID override: ${IPROXY_TARGET_UDID}"
-          ;;
-        restore_match)
-          echo "[+] iproxy target UDID matched restore UDID: ${IPROXY_TARGET_UDID}"
-          ;;
-        ecid_match)
-          echo "[+] iproxy target UDID matched ECID substring: ${IPROXY_TARGET_UDID}"
-          ;;
-      esac
-      return
-    fi
-    rc=$?
-
-    if (( waited == 0 || waited % 5 == 0 )); then
-      case "$rc" in
-        2)
-          echo "  waiting for USBMux disambiguation... ${waited}s elapsed"
-          ;;
-        3)
-          echo "  waiting for restore UDID/ECID match (strict mode)... ${waited}s elapsed"
-          ;;
-        *)
-          echo "  waiting for USBMux device... ${waited}s elapsed"
-          ;;
-      esac
-    fi
-
-    sleep "$interval"
-    (( waited += interval ))
-  done
-
-  echo "[-] Timed out resolving iproxy target UDID after ${timeout}s."
-  echo "[-] USBMux IDs currently visible:"
-  print_usbmux_udids
-  if [[ "$IPROXY_RESOLVE_REASON" == "single_mismatch" ]]; then
-    die "Only non-matching USBMux device was visible. Strict identity isolation is enabled; wait for restore UDID/ECID or set IPROXY_UDID explicitly."
-  fi
-  if [[ "$IPROXY_RESOLVE_REASON" == "ambiguous" ]]; then
-    die "Multiple USBMux devices detected and none uniquely matched restore UDID/ECID. Set IPROXY_UDID explicitly."
-  fi
-  die "No USBMux devices detected for iproxy. Ensure ramdisk has fully booted USB stack."
-}
-
-port_is_listening() {
-  local port="$1"
-  lsof -n -t -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1
-}
-
-pick_random_ssh_port() {
-  local attempt port
-  for attempt in {1..200}; do
-    port=$((20000 + (RANDOM % 40000)))
-    if ! port_is_listening "$port"; then
-      echo "$port"
-      return 0
-    fi
-  done
-  return 1
-}
-
-choose_ramdisk_ssh_port() {
-  if [[ -n "$RAMDISK_SSH_PORT" ]]; then
-    [[ "$RAMDISK_SSH_PORT" == <-> ]] || die "RAMDISK_SSH_PORT must be an integer"
-    (( RAMDISK_SSH_PORT >= 1 && RAMDISK_SSH_PORT <= 65535 )) \
-      || die "RAMDISK_SSH_PORT out of range: ${RAMDISK_SSH_PORT}"
-    if port_is_listening "$RAMDISK_SSH_PORT"; then
-      die "RAMDISK_SSH_PORT ${RAMDISK_SSH_PORT} is already in use"
-    fi
-    return
-  fi
-
-  RAMDISK_SSH_PORT="$(pick_random_ssh_port)" \
-    || die "Failed to allocate a random local SSH forward port"
 }
 
 parse_bool() {
@@ -498,11 +306,6 @@ cleanup() {
     BOOT_FIFO=""
   fi
 
-  if [[ -n "$IPROXY_PID" ]]; then
-    stop_process_tree "$IPROXY_PID"
-    IPROXY_PID=""
-  fi
-
   if [[ -n "$DFU_PID" ]]; then
     stop_process_tree "$DFU_PID"
     DFU_PID=""
@@ -519,17 +322,22 @@ start_first_boot() {
   mkdir -p "$LOG_DIR"
   : > "$BOOT_LOG"
 
+  local target="boot"
+  if [ "$1" -eq 1 ]; then
+    target="boot_less"
+  fi
+
   BOOT_FIFO="$(mktemp -u "${TMPDIR:-/tmp}/vphone-first-boot.XXXXXX")"
   mkfifo "$BOOT_FIFO"
 
-  (make boot <"$BOOT_FIFO" >"$BOOT_LOG" 2>&1) &
+  (make "$target" <"$BOOT_FIFO" >"$BOOT_LOG" 2>&1) &
   BOOT_PID=$!
 
   exec {BOOT_FIFO_FD}>"$BOOT_FIFO"
 
   sleep 2
   if ! kill -0 "$BOOT_PID" 2>/dev/null; then
-    die "make boot exited early during first boot stage"
+    die "make $target exited early during first boot stage"
   fi
 }
 
@@ -848,120 +656,6 @@ wait_for_recovery() {
   exit 1
 }
 
-start_iproxy() {
-  [[ -n "$DEVICE_UDID" ]] || die "Device UDID is empty; cannot resolve iproxy target"
-
-  choose_ramdisk_ssh_port
-  wait_for_iproxy_target_udid
-
-  if port_is_listening "$RAMDISK_SSH_PORT"; then
-    if [[ "$RAMDISK_SSH_PORT_EXPLICIT" == "1" ]]; then
-      die "RAMDISK_SSH_PORT ${RAMDISK_SSH_PORT} is already in use"
-    fi
-    RAMDISK_SSH_PORT="$(pick_random_ssh_port)" \
-      || die "Failed to allocate a free random local SSH forward port"
-  fi
-
-  IPROXY_LOG="${LOG_DIR}/iproxy_${RAMDISK_SSH_PORT}.log"
-  mkdir -p "$LOG_DIR"
-  : > "$IPROXY_LOG"
-
-  local pmd3_python
-  pmd3_python="$(find_python_for_pmd3 || true)"
-  [[ -x "$pmd3_python" ]] || die "pymobiledevice3 python runtime not found (run: make setup_tools)"
-  echo "[*] Starting pymobiledevice3 usbmux forward ${RAMDISK_SSH_PORT} -> 22 (target_udid=${IPROXY_TARGET_UDID}, restore_udid=${DEVICE_UDID}, ecid=0x${DEVICE_ECID})..."
-  ("$pmd3_python" -m pymobiledevice3 usbmux forward --serial "$IPROXY_TARGET_UDID" "$RAMDISK_SSH_PORT" 22 >"$IPROXY_LOG" 2>&1) &
-  IPROXY_PID=$!
-
-  sleep 1
-  if ! kill -0 "$IPROXY_PID" 2>/dev/null; then
-    echo "[-] iproxy exited early. Log:"
-    tail -n 40 "$IPROXY_LOG" || true
-    exit 1
-  fi
-
-  echo "[+] iproxy running (pid=$IPROXY_PID, log=$IPROXY_LOG)"
-}
-
-wait_for_ramdisk_ssh() {
-  local sshpass_bin
-  local waited=0
-
-  [[ "$RAMDISK_SSH_TIMEOUT" == <-> ]] || die "RAMDISK_SSH_TIMEOUT must be an integer (seconds)"
-  [[ "$RAMDISK_SSH_INTERVAL" == <-> ]] || die "RAMDISK_SSH_INTERVAL must be an integer (seconds)"
-  (( RAMDISK_SSH_TIMEOUT > 0 )) || die "RAMDISK_SSH_TIMEOUT must be > 0"
-  (( RAMDISK_SSH_INTERVAL > 0 )) || die "RAMDISK_SSH_INTERVAL must be > 0"
-
-  sshpass_bin="$(command -v sshpass || true)"
-  [[ -x "$sshpass_bin" ]] || die "sshpass not found (run: make setup_tools)"
-
-  echo "[*] Waiting for ramdisk SSH on ${RAMDISK_SSH_USER}@127.0.0.1:${RAMDISK_SSH_PORT} (timeout=${RAMDISK_SSH_TIMEOUT}s)..."
-  while (( waited < RAMDISK_SSH_TIMEOUT )); do
-    if [[ -n "$IPROXY_PID" ]] && ! kill -0 "$IPROXY_PID" 2>/dev/null; then
-      echo "[-] iproxy process exited while waiting for ramdisk SSH."
-      if [[ -n "$IPROXY_LOG" ]]; then
-        echo "[-] iproxy log tail:"
-        tail -n 40 "$IPROXY_LOG" 2>/dev/null || true
-      fi
-      die "iproxy exited before ramdisk SSH became ready."
-    fi
-
-    if [[ -f "$DFU_LOG" ]] && grep -Eiq 'panic|kernel panic|stackshot succeeded|panic\.apple\.com' "$DFU_LOG"; then
-      echo "[-] Detected panic markers in boot_dfu log while waiting for ramdisk SSH."
-      echo "[-] boot_dfu log tail:"
-      tail -n 80 "$DFU_LOG" 2>/dev/null || true
-      die "Ramdisk boot appears to have panicked before SSH became ready."
-    fi
-
-    if [[ -n "$DFU_PID" ]] && ! kill -0 "$DFU_PID" 2>/dev/null; then
-      echo "[-] boot_dfu process exited while waiting for ramdisk SSH."
-      echo "[-] boot_dfu log tail:"
-      tail -n 80 "$DFU_LOG" 2>/dev/null || true
-      die "DFU boot exited before ramdisk SSH became ready."
-    fi
-
-    if "$sshpass_bin" -p "$RAMDISK_SSH_PASS" ssh \
-      -o StrictHostKeyChecking=no \
-      -o UserKnownHostsFile=/dev/null \
-      -o PreferredAuthentications=password \
-      -o ConnectTimeout=5 \
-      -q \
-      -p "$RAMDISK_SSH_PORT" \
-      "${RAMDISK_SSH_USER}@127.0.0.1" "echo ready" >/dev/null 2>&1
-    then
-      echo "[+] Ramdisk SSH is ready"
-      return
-    fi
-
-    if (( waited == 0 || waited % 10 == 0 )); then
-      echo "  waiting... ${waited}s elapsed"
-    fi
-
-    sleep "$RAMDISK_SSH_INTERVAL"
-    (( waited += RAMDISK_SSH_INTERVAL ))
-  done
-
-  echo "[-] Timed out waiting for ramdisk SSH readiness."
-  echo "[-] Identity context: restore_udid=${DEVICE_UDID}, ecid=0x${DEVICE_ECID}, iproxy_target_udid=${IPROXY_TARGET_UDID}"
-  echo "[-] USBMux IDs at timeout:"
-  print_usbmux_udids
-  if [[ -n "$IPROXY_LOG" ]]; then
-    echo "[-] iproxy log tail:"
-    tail -n 40 "$IPROXY_LOG" 2>/dev/null || true
-  fi
-  echo "[-] boot_dfu log tail:"
-  tail -n 60 "$DFU_LOG" 2>/dev/null || true
-  die "Ramdisk SSH did not become ready in ${RAMDISK_SSH_TIMEOUT}s."
-}
-
-stop_iproxy() {
-  if [[ -n "$IPROXY_PID" ]] && kill -0 "$IPROXY_PID" 2>/dev/null; then
-    echo "[*] Stopping iproxy (pid=$IPROXY_PID)..."
-    stop_process_tree "$IPROXY_PID"
-  fi
-  IPROXY_PID=""
-}
-
 parse_args() {
   local arg
   for arg in "$@"; do
@@ -981,12 +675,9 @@ parse_args() {
       --skip-project-setup)
         SKIP_PROJECT_SETUP=1
         ;;
-      --phase=*)
-        PHASE="${arg#--phase=}"
-        ;;
       -h|--help)
         cat <<'EOF'
-Usage: setup_machine.sh [--jb] [--dev] [--exp] [--less] [--skip-project-setup] [--phase=all|prep|install]
+Usage: setup_machine.sh [--jb] [--dev] [--exp] [--less] [--skip-project-setup]
 
 Options:
   --jb                    Use jailbreak firmware patching + jailbreak CFW install.
@@ -997,15 +688,6 @@ Options:
                           rewrite, opt-in build-version spoof via SPOOF_BUILD).
   --less                  Use patchless firmware patching + CFW install.
   --skip-project-setup    Skip setup_tools/build stage.
-  --phase=all             Default. Run the full pipeline in one shot.
-  --phase=prep            Run setup/firmware/restore only; stop before ramdisk+CFW.
-                          Use this when you want to reboot the host (to clear
-                          mds/syspolicyd/amfid wedges) before the heavy ldid
-                          step in --phase=install.
-  --phase=install         Resume from ramdisk_build through first boot/analysis.
-                          Requires --phase=prep (or a previous --phase=all that
-                          got at least past restore) to have run already; the
-                          firmware artifacts in vm/ are reused as-is.
 
 Environment:
   INTERACTIVE=1           Prompt at first-boot stages (default: non-interactive — auto-continue + boot analysis).
@@ -1022,39 +704,6 @@ EOF
         ;;
     esac
   done
-
-  case "$PHASE" in
-    all|prep|install) ;;
-    *) die "Invalid --phase value: ${PHASE} (expected: all, prep, install)" ;;
-  esac
-}
-
-# preflight_install_phase ensures the firmware artifacts produced by --phase=prep
-# (or by an earlier --phase=all run) are present before we re-enter the device
-# interaction stage. We don't try to validate everything — downstream make
-# targets fail loud enough — but we want a friendly error if the user runs
-# --phase=install without ever having run prep, or in the wrong directory.
-preflight_install_phase() {
-  local restore_dir_glob="${VM_DIR_ABS}/iPhone"
-  local found_restore_dir=0
-  local entry
-
-  [[ -d "$VM_DIR_ABS" ]] || die "VM directory not found: ${VM_DIR_ABS}\n  Run --phase=prep (or full make setup_machine) first."
-
-  if [[ ! -x "${PROJECT_ROOT}/.build/release/vphone-cli" ]]; then
-    die "Signed binary not found at .build/release/vphone-cli\n  Run --phase=prep (or 'make build') first."
-  fi
-
-  for entry in "${VM_DIR_ABS}"/iPhone*_Restore; do
-    if [[ -f "${entry}/BuildManifest.plist" ]]; then
-      found_restore_dir=1
-      break
-    fi
-  done
-  (( found_restore_dir == 1 )) \
-    || die "No iPhone*_Restore/BuildManifest.plist under ${VM_DIR_ABS}\n  --phase=install needs the firmware artifacts produced by --phase=prep (fw_prepare + fw_patch).\n  Run --phase=prep first."
-
-  echo "[+] --phase=install preflight OK (vm dir + signed binary + restore artifacts present)"
 }
 
 main() {
@@ -1071,122 +720,81 @@ main() {
   setup_sudo_noninteractive
 
   local fw_patch_target="fw_patch"
-  local cfw_install_target="cfw_install"
+  local cfw_variant="regular"      # variant for `cfw_install_host`
   local mode_label="base"
 
   if (( JB_MODE + DEV_MODE + EXP_MODE + LESS_MODE > 1 )); then
     die "--jb, --dev, --exp, and --less are mutually exclusive"
   fi
 
-  if [[ "$LESS_MODE" -eq 1 && "$PHASE" != "all" ]]; then
-    die "--less is incompatible with --phase=${PHASE} (less mode skips the ramdisk+CFW stage that the split is designed around)"
-  fi
-
   if [[ "$JB_MODE" -eq 1 ]]; then
     fw_patch_target="fw_patch_jb"
-    cfw_install_target="cfw_install_jb"
+    cfw_variant="jb"
     mode_label="jailbreak"
   elif [[ "$DEV_MODE" -eq 1 ]]; then
     fw_patch_target="fw_patch_dev"
-    cfw_install_target="cfw_install_dev"
+    cfw_variant="dev"
     mode_label="dev"
   elif [[ "$EXP_MODE" -eq 1 ]]; then
     fw_patch_target="fw_patch_exp"
-    cfw_install_target="cfw_install_exp"
+    cfw_variant="exp"
     mode_label="experimental"
   elif [[ "$LESS_MODE" -eq 1 ]]; then
     fw_patch_target="fw_patch_less"
-    cfw_install_target=""
+    cfw_variant=""
     mode_label="less"
   fi
 
-  echo "[*] setup_machine mode: ${mode_label}, phase=${PHASE}, project_setup=$([[ "$SKIP_PROJECT_SETUP" -eq 1 ]] && echo "skip" || echo "run"), non_interactive=${NON_INTERACTIVE}, no_binpack=${NO_BINPACK}, no_vphoned=${NO_VPHONED}"
+  echo "[*] setup_machine mode: ${mode_label}, project_setup=$([[ "$SKIP_PROJECT_SETUP" -eq 1 ]] && echo "skip" || echo "run"), non_interactive=${NON_INTERACTIVE}, no_binpack=${NO_BINPACK}, no_vphoned=${NO_VPHONED}"
 
-  # ── Phase 1 (prep): project setup + firmware + restore ─────────
-  if [[ "$PHASE" != "install" ]]; then
-    if [[ "$SKIP_PROJECT_SETUP" -eq 1 ]]; then
-      echo ""
-      echo "=== Project setup ==="
-      echo "[*] Skipping setup_tools/build"
-    else
-      check_platform
-      install_brew_deps
-      ensure_python_linked
-
-      run_make "Project setup" setup_tools
-      run_make "Project setup" build
-    fi
-
-    # Activate venv so all child scripts (cfw_install, patchers, etc.) use the
-    # project Python with capstone/keystone/pyimg4 installed, not the bare system python3.
-    export PATH="$PROJECT_ROOT/.venv/bin:$PATH"
-
-    run_make "Firmware prep" vm_new
-    if [[ "$LESS_MODE" -eq 0 ]]; then
-      run_make "Firmware prep" fw_prepare
-      run_make "Firmware patch" "$fw_patch_target"
-    else
-      VARIANT=less run_make "Firmware prep" fw_prepare
-      run_make_sudo "Firmware patch" "$fw_patch_target"
-    fi
-
+  if [[ "$SKIP_PROJECT_SETUP" -eq 1 ]]; then
     echo ""
-    echo "=== Restore phase ==="
-    start_boot_dfu
-    load_device_identity
-    wait_for_recovery
-    run_make "Restore" restore_get_shsh RESTORE_UDID="$DEVICE_UDID" RESTORE_ECID="0x$DEVICE_ECID"
-    run_make "Restore" restore RESTORE_UDID="$DEVICE_UDID" RESTORE_ECID="0x$DEVICE_ECID"
-    wait_for_post_restore_reboot
-    stop_boot_dfu
+    echo "=== Project setup ==="
+    echo "[*] Skipping setup_tools/build"
+  else
+    check_platform
+    install_brew_deps
+    ensure_python_linked
+
+    run_make "Project setup" setup_tools
+    run_make "Project setup" build
   fi
 
-  if [[ "$PHASE" == "prep" ]]; then
-    echo ""
-    echo "=== Prep phase done ==="
-    echo "[+] Firmware artifacts and restored device are ready."
-    echo "    Reboot the host now if you've seen long-uptime hangs (mds/syspolicyd/amfid),"
-    echo "    then resume with:"
-    if [[ "$JB_MODE" -eq 1 ]]; then
-      echo "      make setup_machine_install JB=1"
-    elif [[ "$DEV_MODE" -eq 1 ]]; then
-      echo "      make setup_machine_install DEV=1"
-    elif [[ "$EXP_MODE" -eq 1 ]]; then
-      echo "      make setup_machine_install EXP=1"
-    else
-      echo "      make setup_machine_install"
-    fi
-    return 0
+  # Activate venv so all child scripts (cfw_install, patchers, etc.) use the
+  # project Python with capstone/keystone/pyimg4 installed, not the bare system python3.
+  export PATH="$PROJECT_ROOT/.venv/bin:$PATH"
+
+  run_make "Firmware prep" vm_new
+  if [[ "$LESS_MODE" -eq 0 ]]; then
+    run_make "Firmware prep" fw_prepare
+    run_make "Firmware patch" "$fw_patch_target"
+  else
+    VARIANT=less run_make "Firmware prep" fw_prepare
+    run_make_sudo "Firmware patch" "$fw_patch_target"
   fi
 
-  # ── Phase 2 (install): ramdisk + CFW + first boot + analysis ──
-  if [[ "$PHASE" == "install" ]]; then
-    echo ""
-    echo "=== Install phase preflight ==="
-    preflight_install_phase
-    # venv activation is normally done in the prep block; re-apply for install runs.
-    export PATH="$PROJECT_ROOT/.venv/bin:$PATH"
-  fi
+  echo ""
+  echo "=== Restore phase ==="
+  start_boot_dfu
+  load_device_identity
+  wait_for_recovery
+  run_make "Restore" restore_get_shsh RESTORE_UDID="$DEVICE_UDID" RESTORE_ECID="0x$DEVICE_ECID"
+  run_make "Restore" restore RESTORE_UDID="$DEVICE_UDID" RESTORE_ECID="0x$DEVICE_ECID"
+  wait_for_post_restore_reboot
+  stop_boot_dfu
 
   if [[ "$LESS_MODE" -eq 0 ]]; then
-    echo "[*] Waiting ${POST_KILL_SETTLE_DELAY}s for cleanup before ramdisk stage..."
+    echo "[*] Waiting ${POST_KILL_SETTLE_DELAY}s for cleanup before CFW install..."
     sleep "$POST_KILL_SETTLE_DELAY"
 
+    # Host-mount CFW install + offline snapshot flip. The VM is off after the
+    # restore phase, so we attach Disk.img on the host, place all CFW files, and
+    # rename the boot snapshot offline. cfw_install_host re-execs under sudo
+    # (SUDO_ASKPASS from setup_sudo_noninteractive when SUDO_PASSWORD is set).
     echo ""
-    echo "=== Ramdisk + CFW phase ==="
-    start_boot_dfu
-    load_device_identity
-    wait_for_recovery
-    run_make "Ramdisk" ramdisk_build RAMDISK_UDID="$DEVICE_UDID"
-    echo "[*] Ramdisk identity context: restore_udid=${DEVICE_UDID} ecid=0x${DEVICE_ECID}"
-    run_make "Ramdisk" ramdisk_send IRECOVERY_ECID="0x$DEVICE_ECID" RAMDISK_UDID="$DEVICE_UDID"
-    start_iproxy
-
-    wait_for_ramdisk_ssh
-
-    run_make "CFW install" "$cfw_install_target" SSH_PORT="$RAMDISK_SSH_PORT"
-    stop_boot_dfu
-    stop_iproxy
+    echo "=== CFW install (host-mount) ==="
+    check_vm_storage_locks
+    run_make "CFW install" cfw_install_host VARIANT="$cfw_variant" SPOOF_BUILD="${SPOOF_BUILD:-}"
   fi
 
   if [[ "$LESS_MODE" -eq 0 || "$NO_BINPACK" -eq 0 ]]; then
@@ -1198,7 +806,7 @@ main() {
       echo "[*] non-interactive (default): auto-starting first boot"
     fi
 
-    start_first_boot
+    start_first_boot "$LESS_MODE"
 
     if [[ "$NON_INTERACTIVE" -eq 0 ]]; then
       read -r "?[*] Press Enter once the VM is fully booted"

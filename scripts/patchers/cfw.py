@@ -29,6 +29,45 @@ Commands:
         the mounted SystemOS Cryptex). Targets a fixed list of identity,
         store, and consumer-service dylibs; skips compute/accel libs.
 
+    patch-iomfb-swapend <chunks_dir> [--dry-run]
+        Patch iOS 26.0 and 26.0.1 IOMobileFramebuffer's _kern_SwapEnd external-method
+        payload size from 0x548 to 0x560 for the PCC vphone600 userclient,
+        then re-attest the modified DSC page hash.
+
+    patch-iomfb-force-kern <chunks_dir> [--dry-run]
+        iOS 27 VZ-view fix: retarget IOMobileFramebuffer's public
+        _IOMobileFramebufferSwap* dispatch trampolines to their _kern_Swap*
+        siblings, forcing present onto the userclient method-5 path the 26.4
+        paravirt GPU scans out to the host (27 defaults to the _virt_* callback
+        path the paravirt GPU never receives). Re-attests modified DSC pages.
+        Pairs with the KernelJBPatchIomfbSwap kernel patches (accept 27's 0x6e0
+        SwapEnd struct).
+
+    patch-dsc-maxslide <chunks_dir> [--dry-run] [--force]
+        Zero the dyld_cache_header maxSlide when the userland cache would overflow
+        the vphone600 26.x kernel's 6 GiB shared region (cache span + maxSlide >
+        0x180000000, e.g. iOS 27.0). Lets the cache map at slide 0 so launchd's dyld
+        can map libSystem. Self-gating (no-op if it already fits); no re-attest needed
+        (header field, not a cs_validate'd code page). --force zeroes maxSlide even
+        when the cache fits (non-27 opt-in).
+
+    patch-lsd-embedded-reg <chunks_dir> [--dry-run]
+        Force lsd's -[_LSDModifyClient clientIsEntitledForEmbeddedRegistrationOperations]
+        to always succeed (NOP its entitlement gate + re-attest the page), so app
+        (re)registration works on iOS 27 without the three privileged entitlements it
+        otherwise demands from the XPC peer. Unblocks vphoned/TrollStore/uicache app
+        installs. Self-gating (no-op on pre-iOS-27 userlands where the method is absent).
+
+    patch-xpc-lwcr <chunks_dir> [--dry-run]
+    patch-lockdown-mode <chunks_dir> [--dry-run]
+        Stop libxpc's Lightweight Code Requirement self-check (_xpc_token_satisfies_lwcr)
+        from brk-aborting on our JB. iOS 27's LWCR matcher returns the contradictory
+        (matched=0, error_code=MATCH) pair under our code-signing environment; the
+        assertion crash-loops every daemon that pins an entitlement peer-requirement
+        (intelligencetasksd/searchpartyd/transparencyd/bluetoothd/...). Derives `matched`
+        from error_code + drops the abort (cset w0,eq; nop; nop) and re-attests the page.
+        Self-gating (no-op on pre-iOS-27 userlands where the symbol is absent).
+
     patch-camera-dsc <chunks_dir> <dsc_header> [--dry-run] [--force]
         Apply the 10-patch set to the DSC chunks that makes Camera.app
         launch-survivable on a vphone VM: synthesises a single
@@ -49,8 +88,18 @@ Commands:
         escalates to a kernel panic. Also recomputes the affected
         CodeDirectory slot hash via cfw_macho_codesign.
 
+    patch-diskimagesiod <binary>
+        Force -[DIDiskArb isMountCompleteWithExpectedCount:diskTracker:] to return
+        YES so MobileStorageMounter proceeds to mount the iOS-27 personalized DDI at
+        /System/Developer (its waitForDAMount otherwise hangs forever on the 26.4
+        vphone600 hybrid). Pairs with the DiskImages2 ABI + sandbox
+        mac_policy_ops[124] JB kernel patches. No-op-in-effect on matched userlands.
+
     inject-daemons <launchd.plist> <daemon_dir>
         Inject bash/dropbear/trollvnc into launchd.plist.
+
+    patch-dropbear-plist <dropbear.plist>
+        Rewrite dropbear ProgramArguments to use /var/dropbear host keys.
 
     inject-dylib <binary> <dylib_path>
         Inject LC_LOAD_DYLIB into Mach-O binary (thin or universal).
@@ -74,18 +123,32 @@ if __name__ == "__main__":
     from patchers.cfw_patch_mobileactivationd import patch_mobileactivationd
     from patchers.cfw_patch_jetsam import patch_launchd_jetsam
     from patchers.cfw_patch_hv_vmm_dsc import patch_hv_vmm_in_dsc
+    from patchers.cfw_patch_iomfb_swapend import patch_iomfb_swapend
+    from patchers.cfw_patch_iomfb_force_kern import patch_iomfb_force_kern
+    from patchers.cfw_patch_dsc_maxslide import patch_dsc_maxslide
+    from patchers.cfw_patch_lsd_embedded_reg import patch_lsd_embedded_reg
+    from patchers.cfw_patch_xpc_lwcr import patch_xpc_lwcr
+    from patchers.cfw_patch_lockdown_mode import patch_lockdown_mode
     from patchers.cfw_patch_camera_dsc import apply_all_camera_patches
     from patchers.cfw_patch_watchdogd import patch_watchdogd
-    from patchers.cfw_daemons import parse_cryptex_paths, inject_daemons
+    from patchers.cfw_patch_diskimagesiod import patch_diskimagesiod
+    from patchers.cfw_daemons import parse_cryptex_paths, inject_daemons, patch_dropbear_plist
 else:
     from .cfw_patch_seputil import patch_seputil
     from .cfw_patch_cache_loader import patch_launchd_cache_loader
     from .cfw_patch_mobileactivationd import patch_mobileactivationd
     from .cfw_patch_jetsam import patch_launchd_jetsam
     from .cfw_patch_hv_vmm_dsc import patch_hv_vmm_in_dsc
+    from .cfw_patch_iomfb_swapend import patch_iomfb_swapend
+    from .cfw_patch_iomfb_force_kern import patch_iomfb_force_kern
+    from .cfw_patch_dsc_maxslide import patch_dsc_maxslide
+    from .cfw_patch_lsd_embedded_reg import patch_lsd_embedded_reg
+    from .cfw_patch_xpc_lwcr import patch_xpc_lwcr
+    from .cfw_patch_lockdown_mode import patch_lockdown_mode
     from .cfw_patch_camera_dsc import apply_all_camera_patches
     from .cfw_patch_watchdogd import patch_watchdogd
-    from .cfw_daemons import parse_cryptex_paths, inject_daemons
+    from .cfw_patch_diskimagesiod import patch_diskimagesiod
+    from .cfw_daemons import parse_cryptex_paths, inject_daemons, patch_dropbear_plist
 
 
 def main():
@@ -139,6 +202,67 @@ def main():
         results = patch_hv_vmm_in_dsc(sys.argv[2], dry_run=dry_run)
         sys.exit(0)
 
+    elif cmd == "patch-iomfb-swapend":
+        if len(sys.argv) < 3:
+            print("Usage: patch_cfw.py patch-iomfb-swapend <chunks_dir> "
+                  "[--target-size <hex|int>] [--dry-run]")
+            sys.exit(1)
+        dry_run = "--dry-run" in sys.argv[3:]
+        kwargs = {}
+        if "--target-size" in sys.argv:
+            i = sys.argv.index("--target-size")
+            kwargs["target_size"] = int(sys.argv[i + 1], 0)
+        try:
+            patch_iomfb_swapend(sys.argv[2], dry_run=dry_run, **kwargs)
+        except ValueError as e:
+            print(f"[-] {e}")
+            sys.exit(1)
+        sys.exit(0)
+
+    elif cmd == "patch-iomfb-force-kern":
+        if len(sys.argv) < 3:
+            print("Usage: patch_cfw.py patch-iomfb-force-kern <chunks_dir> [--dry-run]")
+            sys.exit(1)
+        dry_run = "--dry-run" in sys.argv[3:]
+        try:
+            patch_iomfb_force_kern(sys.argv[2], dry_run=dry_run)
+        except ValueError as e:
+            print(f"[-] {e}")
+            sys.exit(1)
+        sys.exit(0)
+
+    elif cmd == "patch-dsc-maxslide":
+        if len(sys.argv) < 3:
+            print("Usage: patch_cfw.py patch-dsc-maxslide <chunks_dir> [--dry-run] [--force]")
+            sys.exit(1)
+        dry_run = "--dry-run" in sys.argv[3:]
+        force = "--force" in sys.argv[3:]
+        patch_dsc_maxslide(sys.argv[2], dry_run=dry_run, force=force)
+        sys.exit(0)
+
+    elif cmd == "patch-lsd-embedded-reg":
+        if len(sys.argv) < 3:
+            print("Usage: patch_cfw.py patch-lsd-embedded-reg <chunks_dir> [--dry-run]")
+            sys.exit(1)
+        dry_run = "--dry-run" in sys.argv[3:]
+        patch_lsd_embedded_reg(sys.argv[2], dry_run=dry_run)
+        sys.exit(0)
+
+    elif cmd == "patch-xpc-lwcr":
+        if len(sys.argv) < 3:
+            print("Usage: patch_cfw.py patch-xpc-lwcr <chunks_dir> [--dry-run]")
+            sys.exit(1)
+        dry_run = "--dry-run" in sys.argv[3:]
+        patch_xpc_lwcr(sys.argv[2], dry_run=dry_run)
+
+    elif cmd == "patch-lockdown-mode":
+        if len(sys.argv) < 3:
+            print("Usage: patch_cfw.py patch-lockdown-mode <chunks_dir> [--dry-run]")
+            sys.exit(1)
+        dry_run = "--dry-run" in sys.argv[3:]
+        patch_lockdown_mode(sys.argv[2], dry_run=dry_run)
+        sys.exit(0)
+
     elif cmd == "patch-camera-dsc":
         if len(sys.argv) < 4:
             print("Usage: patch_cfw.py patch-camera-dsc <chunks_dir> <dsc_header> [--dry-run] [--force]")
@@ -163,11 +287,24 @@ def main():
         # exception (unparseable binary / no anchor) is fatal.
         sys.exit(0)
 
+    elif cmd == "patch-diskimagesiod":
+        if len(sys.argv) < 3:
+            print("Usage: patch_cfw.py patch-diskimagesiod <binary>")
+            sys.exit(1)
+        if not patch_diskimagesiod(sys.argv[2]):
+            sys.exit(1)
+
     elif cmd == "inject-daemons":
         if len(sys.argv) < 4:
             print("Usage: patch_cfw.py inject-daemons <launchd.plist> <daemon_dir>")
             sys.exit(1)
         inject_daemons(sys.argv[2], sys.argv[3])
+
+    elif cmd == "patch-dropbear-plist":
+        if len(sys.argv) < 3:
+            print("Usage: patch_cfw.py patch-dropbear-plist <dropbear.plist>")
+            sys.exit(1)
+        patch_dropbear_plist(sys.argv[2])
 
     elif cmd == "inject-dylib":
         if len(sys.argv) < 4:
@@ -194,7 +331,8 @@ def main():
         print(f"Unknown command: {cmd}")
         print("Commands: cryptex-paths, patch-seputil, patch-launchd-cache-loader, patch-camera-dsc,")
         print("          patch-mobileactivationd, patch-launchd-jetsam,")
-        print("          patch-hv-vmm-dsc, patch-watchdogd, inject-daemons, inject-dylib")
+        print("          patch-hv-vmm-dsc, patch-iomfb-swapend, patch-iomfb-force-kern, patch-dsc-maxslide, patch-lsd-embedded-reg, patch-xpc-lwcr, patch-lockdown-mode, patch-watchdogd,")
+        print("          patch-diskimagesiod, inject-daemons, patch-dropbear-plist, inject-dylib")
         sys.exit(1)
 
 

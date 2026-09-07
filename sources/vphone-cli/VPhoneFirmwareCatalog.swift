@@ -36,7 +36,7 @@ struct VPhoneFirmware: Identifiable, Hashable, Sendable {
 /// VERSION/BUILD/STATUS table.
 @Observable
 @MainActor
-final class VPhoneFirmwareCatalog {
+final class VPhoneMakeFirmwareCatalog {
     let repoRoot: URL
     let device: String
 

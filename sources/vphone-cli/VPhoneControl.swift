@@ -1,6 +1,7 @@
 import CryptoKit
 import Foundation
 import Virtualization
+import VPhoneCore
 
 /// Host-side client for the vphoned guest agent.
 ///
@@ -36,6 +37,19 @@ class VPhoneControl {
     /// reported in the hello response. This is the stable endpoint to point a
     /// proxy client (Surge) at — it bypasses the vsock bridge entirely.
     private(set) var guestSocks5Endpoint: String?
+    /// Guest userland iOS version reported at handshake (e.g. "18.6.2"), if known.
+    private(set) var guestIOSVersion: String?
+
+    /// Whether touches should be injected guest-side via vphoned rather than the
+    /// VZ USB touchscreen. True for iOS 18 bases: on the 26.x kernel their USB
+    /// touchscreen dext receives reports but emits no digitizer events, so the
+    /// UI never sees touches. 26.x bases keep the native VZ multitouch path.
+    var useGuestTouchInjection: Bool {
+        guard isConnected, guestCaps.contains("touch"),
+              let major = guestIOSVersion.flatMap({ Int($0.split(separator: ".").first ?? "") })
+        else { return false }
+        return major < 26
+    }
     /// Path to the signed vphoned binary. When set, enables auto-update.
     var guestBinaryURL: URL?
 
@@ -125,23 +139,8 @@ class VPhoneControl {
     }
 
     private static func signCertURL() -> URL? {
-        let fm = FileManager.default
-        let candidates = [
-            Bundle.main.resourceURL?.appendingPathComponent("signcert.p12"),
-            Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/signcert.p12"),
-            URL(fileURLWithPath: fm.currentDirectoryPath).appendingPathComponent(
-                "scripts/vphoned/signcert.p12"
-            ),
-            URL(fileURLWithPath: fm.currentDirectoryPath).appendingPathComponent(
-                "../scripts/vphoned/signcert.p12"
-            ),
-        ]
-        for candidate in candidates.compactMap(\.self) {
-            if fm.fileExists(atPath: candidate.path) {
-                return candidate
-            }
-        }
-        return nil
+        let signcert = VPhoneResources.resolve().signcert
+        return FileManager.default.fileExists(atPath: signcert.path) ? signcert : nil
     }
 
     // MARK: - Guest Binary Hash
@@ -231,6 +230,7 @@ class VPhoneControl {
             let caps = resp["caps"] as? [String] ?? []
             let ip = resp["ip"] as? String
             let socks5 = resp["socks5_tcp"] as? String
+            let iosVersion = resp["ios"] as? String
             let needUpdate = resp["need_update"] as? Bool ?? false
 
             Task { @MainActor in
@@ -247,10 +247,15 @@ class VPhoneControl {
                 self.guestCaps = caps
                 self.guestIP = ip
                 self.guestSocks5Endpoint = socks5
+                self.guestIOSVersion = iosVersion
                 self.isConnected = true
                 self.vsockStallStreak = 0 // clean connect — helper is healthy
                 let ipSuffix = ip.map { " (\($0))" } ?? ""
-                print("[control] connected to \(name) v\(version)\(ipSuffix), caps: \(caps)")
+                let iosSuffix = iosVersion.map { " iOS \($0)" } ?? ""
+                print("[control] connected to \(name) v\(version)\(ipSuffix)\(iosSuffix), caps: \(caps)")
+                if self.useGuestTouchInjection {
+                    print("[control] guest-side touch injection enabled (iOS \(iosVersion ?? "?"))")
+                }
                 if let socks5 {
                     print("[socks5] direct SOCKS5 ready at \(socks5) — point Surge here (bypasses the vsock bridge)")
                 }
@@ -331,6 +336,24 @@ class VPhoneControl {
         print(
             "[control] hid page=0x\(String(page, radix: 16)) usage=0x\(String(usage, radix: 16))\(suffix)"
         )
+    }
+
+    /// Inject a single-finger digitizer touch guest-side (bypasses VZ USB touch).
+    /// phase: 0 = down, 1 = move, 3 = up. x/y are normalized 0..1, top-left origin.
+    func sendTouch(phase: Int, x: Double, y: Double) {
+        nextRequestId += 1
+        let msg: [String: Any] = [
+            "v": Self.protocolVersion,
+            "t": "touch",
+            "id": String(nextRequestId, radix: 16),
+            "phase": phase,
+            "x": x,
+            "y": y,
+        ]
+        guard let fd = connection?.fileDescriptor, writeMessage(fd: fd, dict: msg) else {
+            print("[control] touch send failed (not connected)")
+            return
+        }
     }
 
     // MARK: - Developer Mode
