@@ -2,27 +2,31 @@ import Foundation
 import VPhoneCore
 
 /// Discovers and describes the VM directories the manager presents as a
-/// library. A VM is any directory containing a `config.plist`. Two roots are
-/// scanned: the legacy single-slot `vm/` (so an existing install shows up
-/// immediately) and a `vms/` library root where future VMs live, each in its
-/// own directory. The on-disk VM dir is already self-contained and relocatable
-/// (relative paths in the manifest), so directory == VM with no extra wiring.
+/// library. A VM is any directory containing a `config.plist`. Three roots are
+/// scanned: the CLI's VM library (`~/.vphone/VMs`, or `$VPHONE_LIBRARY_ROOT`),
+/// where `vm create` and the wizard put new bundles; the legacy single-slot
+/// `vm/` in the clone (so an existing make-built install shows up); and the
+/// clone's pre-library `vms/`. The on-disk VM dir is self-contained and
+/// relocatable (relative paths in the manifest), so directory == VM with no
+/// extra wiring.
 @MainActor
 final class VPhoneVMRegistry {
     let repoRoot: URL
     let libraryRoot: URL
     let legacyVMDir: URL
+    let legacyLibraryDir: URL
 
     init(repoRoot: URL, libraryRoot: URL? = nil) {
         self.repoRoot = repoRoot
-        self.libraryRoot = libraryRoot ?? repoRoot.appendingPathComponent("vms")
+        self.libraryRoot = libraryRoot ?? VPhoneLibrary.defaultRoot()
         legacyVMDir = repoRoot.appendingPathComponent("vm")
+        legacyLibraryDir = repoRoot.appendingPathComponent("vms")
     }
 
     // MARK: Discovery
 
-    /// All VM directories, de-duplicated and ordered (legacy `vm/` first, then
-    /// `vms/*` alphabetically).
+    /// All VM directories, de-duplicated and ordered: legacy `vm/` first, then
+    /// the clone's `vms/*`, then the library, each group alphabetical.
     func discover() -> [URL] {
         var result: [URL] = []
         var seen = Set<String>()
@@ -36,12 +40,12 @@ final class VPhoneVMRegistry {
         }
 
         consider(legacyVMDir)
-
-        if let entries = try? FileManager.default.contentsOfDirectory(
-            at: libraryRoot,
-            includingPropertiesForKeys: [.isDirectoryKey],
-            options: [.skipsHiddenFiles]
-        ) {
+        for root in [legacyLibraryDir, libraryRoot] {
+            guard let entries = try? FileManager.default.contentsOfDirectory(
+                at: root,
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: [.skipsHiddenFiles]
+            ) else { continue }
             for entry in entries.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
                 consider(entry)
             }
@@ -50,20 +54,33 @@ final class VPhoneVMRegistry {
         return result
     }
 
+    /// Home-relative form for labels (`~/.vphone/VMs/foo`).
+    static func displayPath(_ url: URL) -> String {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let path = url.standardizedFileURL.path
+        if path == home { return "~" }
+        if path.hasPrefix(home + "/") { return "~" + path.dropFirst(home.count) }
+        return path
+    }
+
     private func hasConfig(_ dir: URL) -> Bool {
         var isDir: ObjCBool = false
         let cfg = dir.appendingPathComponent("config.plist").path
         return FileManager.default.fileExists(atPath: cfg, isDirectory: &isDir) && !isDir.boolValue
     }
 
-    /// How many existing VMs were restored from each firmware build, read from
-    /// the `iPhone<device>_<version>_<build>_Restore` folder the pipeline leaves
-    /// in each VM dir. Lets the create wizard default to a firmware the user
+    /// How many existing VMs were restored from each firmware build: from the
+    /// `restore-info.json` `vm create` writes, else from the
+    /// `iPhone<device>_<version>_<build>_Restore` folder the make pipeline
+    /// leaves behind. Lets the create wizard default to a firmware the user
     /// already has a device on — no re-download, and proven on this machine.
     func installedBuildCounts() -> [String: Int] {
         var counts: [String: Int] = [:]
         for dir in discover() {
             var builds = Set<String>()
+            if let info = Self.restoreInfo(in: dir) {
+                builds.insert(info.ios.build)
+            }
             let entries = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
             for name in entries where name.hasPrefix("iPhone") && name.hasSuffix("_Restore") {
                 // "iPhone17,3_26.1_23B85_Restore" → build is the last `_`-field
@@ -77,6 +94,12 @@ final class VPhoneVMRegistry {
         return counts
     }
 
+    /// The `restore-info.json` snapshot `vm create` leaves in a bundle, if any.
+    nonisolated static func restoreInfo(in dir: URL) -> VPhoneRestoreInfo? {
+        guard let data = try? Data(contentsOf: dir.appendingPathComponent("restore-info.json")) else { return nil }
+        return try? JSONDecoder().decode(VPhoneRestoreInfo.self, from: data)
+    }
+
     // MARK: Loading
 
     /// Build a managed VM for a directory by merging the boot manifest with the
@@ -88,12 +111,13 @@ final class VPhoneVMRegistry {
             return nil
         }
         let meta = VPhoneVMMeta.load(fromVMDir: std)
+        let restore = Self.restoreInfo(in: std)
 
         return VPhoneManagedVM(
             dirURL: std,
             displayName: meta?.displayName ?? defaultDisplayName(for: std),
-            variant: meta?.variant ?? "regular",
-            iosVersion: meta?.iosVersion,
+            variant: meta?.variant ?? restore?.variant ?? "regular",
+            iosVersion: meta?.iosVersion ?? restore?.ios.version,
             cpuCount: Int(manifest.cpuCount),
             memoryBytes: manifest.memorySize,
             provisioned: !manifest.machineIdentifier.isEmpty,

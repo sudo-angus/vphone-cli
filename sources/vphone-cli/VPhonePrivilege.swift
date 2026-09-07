@@ -9,7 +9,9 @@ import Foundation
 /// `visudo`-validated `/etc/sudoers.d/vphone` granting NOPASSWD for *only* those
 /// exact commands. Afterward amfidont can be (re)started silently and every VM
 /// boots without a prompt, surviving host reboots. "Remove authorization"
-/// deletes the file.
+/// deletes the file. Creating a VM does not go through here: the wizard runs
+/// `vm create --root-popup`, whose CFW host-mount asks for root through
+/// macOS's own authentication dialog.
 @MainActor
 final class VPhonePrivilege {
     enum AuthStatus: Sendable, Equatable {
@@ -102,16 +104,11 @@ final class VPhonePrivilege {
 
     private func sudoersContent(python: String) -> String {
         let tproxy = repoRoot.appendingPathComponent("scripts/vm_tproxy_start.sh").path
-        var commands = [
+        let commands = [
             "\(python) -m amfidont daemon --path \(repoRoot.path) --spoof-apple",
             "\(tproxy) start",
             "\(tproxy) stop",
-            "/usr/bin/hdiutil",
         ]
-        // The ramdisk build extracts the SSH toolchain into the mounted ramdisk
-        // as root via gnu-tar (scripts/ramdisk_build.py). Without this the create
-        // stalls partway through on a surprise mid-run sudo prompt.
-        if let gtar = resolveGtar() { commands.append(gtar) }
 
         let rules = commands
             .map { "\(userName) ALL=(root) NOPASSWD: \($0)" }
@@ -124,37 +121,6 @@ final class VPhonePrivilege {
         \(rules)
 
         """
-    }
-
-    /// Whether a VM *create* can run hands-free. Beyond boot's elevations it
-    /// mounts the CFW DMG (`hdiutil`) and extracts the ramdisk toolchain
-    /// (`gtar`). A rule predating either line still prompts mid-create, so both
-    /// must be NOPASSWD-allowed; a `false` here makes the wizard (re)authorize.
-    ///
-    /// Inspect the *rule listing* rather than `sudo -n -l <cmd>` per command:
-    /// the per-command form returns "allowed" off a warm sudo timestamp even
-    /// when the command isn't NOPASSWD, so a stale rule (missing hdiutil/gtar)
-    /// would pass here and then prompt for real at the privileged step.
-    func canCreatePasswordless() -> Bool {
-        let (rc, listing) = Self.runCapture("/usr/bin/sudo", ["-n", "-l"])
-        guard rc == 0, listing.contains("NOPASSWD:"), listing.contains("/usr/bin/hdiutil")
-        else { return false }
-        if let gtar = resolveGtar(), !listing.contains(gtar) { return false }
-        return true
-    }
-
-    /// Absolute path `sudo gtar` resolves to in the create subprocess (Homebrew
-    /// gnu-tar). Must match what `ramdisk_build.py` invokes so the sudoers rule
-    /// matches. nil when gnu-tar isn't installed (create will fail its own
-    /// prerequisite check first).
-    func resolveGtar() -> String? {
-        for candidate in ["/opt/homebrew/bin/gtar", "/usr/local/bin/gtar"]
-            where FileManager.default.isExecutableFile(atPath: candidate) {
-            return candidate
-        }
-        let (rc, out) = Self.runCapture("/usr/bin/which", ["gtar"])
-        let path = out.trimmingCharacters(in: .whitespacesAndNewlines)
-        return rc == 0 && !path.isEmpty ? path : nil
     }
 
     // MARK: - amfidont

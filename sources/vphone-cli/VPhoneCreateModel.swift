@@ -1,9 +1,11 @@
 import Foundation
 import Observation
+import VPhoneCore
 
 /// State for the "New VM" wizard: the configuration the user picks before the
-/// orchestration engine drives `setup_machine.sh`. New VMs are created in
-/// `vms/<slug>/` so the existing `vm/` is never touched.
+/// engine drives `vphone-cli vm create`. New VMs land in the same library the
+/// CLI uses (`~/.vphone/VMs` unless overridden), so `vm list` / `vm launch` and
+/// the manager see one set of bundles.
 @Observable
 @MainActor
 final class VPhoneCreateModel: Identifiable {
@@ -33,21 +35,14 @@ final class VPhoneCreateModel: Identifiable {
             }
         }
 
-        /// The `make` flag that selects this variant (nil for regular).
-        var makeFlag: String? {
-            switch self {
-            case .regular: nil
-            case .dev: "DEV=1"
-            case .jb: "JB=1"
-            case .exp: "EXP=1"
-            case .less: "LESS=1"
-            }
-        }
+        /// Variants the wizard offers. `less` has to run as root end to end
+        /// (`sudo vphone-cli vm create -V less …`), which a GUI shouldn't do.
+        static let wizardChoices: [Variant] = [.regular, .dev, .jb, .exp]
     }
 
     let registry: VPhoneVMRegistry
     let privilege: VPhonePrivilege
-    let catalog: VPhoneMakeFirmwareCatalog
+    let catalog: VPhoneFirmwareChoices
     let engine = VPhoneCreateEngine()
 
     var name = "vPhone"
@@ -62,24 +57,36 @@ final class VPhoneCreateModel: Identifiable {
     init(registry: VPhoneVMRegistry, privilege: VPhonePrivilege) {
         self.registry = registry
         self.privilege = privilege
-        catalog = VPhoneMakeFirmwareCatalog(repoRoot: registry.repoRoot)
+        catalog = VPhoneFirmwareChoices(repoRoot: registry.repoRoot)
     }
 
-    /// Authorize the create-time `hdiutil` elevation if needed, then kick off
-    /// the orchestration engine.
+    /// `vm create` restores and first-boots through the entitled boot binary,
+    /// which AMFI only admits while amfidont is up — the same precondition as
+    /// starting a VM. Root for the CFW host-mount comes from macOS's own
+    /// authentication dialog inside the child (`--root-popup`), not from here.
     func beginCreate() async {
-        if !privilege.canCreatePasswordless() {
-            do {
-                try await privilege.authorize()
-            } catch VPhoneManagerError.authorizationCancelled {
-                error = "Creating a VM needs admin authorization (it mounts the CFW image as root)."
-                return
-            } catch {
-                self.error = error.localizedDescription
-                return
-            }
+        guard privilege.authStatus() == .authorized else {
+            error = "Authorize admin first (top of the window): the restore and first boot run the entitled boot binary, which needs the AMFI bypass."
+            return
         }
-        engine.start(model: self, repoRoot: registry.repoRoot)
+        switch await privilege.ensureAmfidont() {
+        case .running, .started:
+            break
+        case .needsAuthorization:
+            error = "The AMFI bypass can't start without a password. Remove and redo “Authorize admin”, then retry."
+            return
+        case .unavailable:
+            error = "amfidont isn't importable by any python3. Install it (xcrun python3 -m pip install amfidont) and retry."
+            return
+        case let .failed(message):
+            error = "Could not start the AMFI bypass: \(message)"
+            return
+        }
+        engine.start(
+            model: self,
+            registry: registry,
+            executable: VPhoneVMRegistry.locateBootBinary(repoRoot: registry.repoRoot)
+        )
     }
 
     /// Filesystem-safe directory name derived from the display name.
@@ -102,9 +109,10 @@ final class VPhoneCreateModel: Identifiable {
 
     var targetDir: URL { registry.libraryRoot.appendingPathComponent(slug) }
 
+    var targetDisplayPath: String { VPhoneVMRegistry.displayPath(targetDir) }
+
     var targetExists: Bool {
         FileManager.default.fileExists(atPath: targetDir.path)
-            || FileManager.default.fileExists(atPath: registry.repoRoot.appendingPathComponent("vm/\(slug)").path)
     }
 
     var canCreate: Bool {
@@ -120,7 +128,7 @@ final class VPhoneCreateModel: Identifiable {
 
     /// Default to a firmware the user already has a device on (cheapest, and
     /// already proven on this Mac): the cached build the most existing VMs use.
-    /// Falls back to any cached build, then the highest Supported, then anything.
+    /// Falls back to any cached build, then the highest tested, then anything.
     private func defaultFirmware() -> VPhoneFirmware? {
         let fws = catalog.firmwares
         let installed = registry.installedBuildCounts()
@@ -128,9 +136,9 @@ final class VPhoneCreateModel: Identifiable {
             .filter { $0.ipswCached && (installed[$0.build] ?? 0) > 0 }
             .max { (installed[$0.build] ?? 0) < (installed[$1.build] ?? 0) }
         return onExistingVMs
-            ?? fws.first { $0.ipswCached && $0.isSupported }
-            ?? fws.first { $0.ipswCached }
-            ?? fws.first { $0.isSupported }
-            ?? fws.first
+            ?? fws.last { $0.ipswCached && $0.isSupported }
+            ?? fws.last { $0.ipswCached }
+            ?? fws.last { $0.isSupported }
+            ?? fws.last
     }
 }

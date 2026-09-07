@@ -136,6 +136,13 @@ the AMFI bypass runs without a password. Launch the app as **VPhone**, with
 `open -a VPhone`, or run `make manage` to open the manager without installing the
 launcher. Remove the launcher with `make uninstall_app`.
 
+**New VM…** runs the same native pipeline as `vphone-cli vm create` (download →
+patch → DFU restore → host-mount CFW → first boot). VMs it creates live in the
+CLI's library, `~/.vphone/VMs/` (or `$VPHONE_LIBRARY_ROOT`), so `vm list` /
+`vm launch` / `vm export` see them too; an existing `vm/` in the clone keeps
+showing up in the manager. The CFW install step asks for your password through
+macOS's standard authentication dialog — no extra sudoers rule.
+
 ## Optional Host TCP Workaround
 
 If the host is behind a corporate VPN / traffic-forwarding agent and the guest
