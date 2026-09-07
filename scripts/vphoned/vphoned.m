@@ -17,6 +17,7 @@
 #import <Foundation/Foundation.h>
 #include <arpa/inet.h>
 #include <ifaddrs.h>
+#include <limits.h>
 #include <mach-o/dyld.h>
 #include <net/if.h>
 #include <netinet/in.h>
@@ -25,6 +26,7 @@
 #include <stdarg.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/resource.h>
 #include <sys/time.h>
 #include <unistd.h>
 
@@ -542,9 +544,32 @@ static BOOL handle_client(int fd) {
 
 // MARK: - Main
 
+/// The direct SOCKS5 relay keeps two sockets per proxied connection, so a
+/// host proxy that routes everything through the guest (Surge pointed at the
+/// vmnet alias) reaches iOS's default 256-descriptor soft limit within
+/// seconds. After that every open() in this process fails with EMFILE: IPA
+/// extraction, file uploads, keychain dumps. Lift the soft limit to the hard
+/// cap; Darwin rejects anything above OPEN_MAX even when rlim_max is infinite.
+static void lift_fd_limit(void) {
+  struct rlimit rl;
+  if (getrlimit(RLIMIT_NOFILE, &rl) != 0)
+    return;
+  rlim_t want = (rl.rlim_max == RLIM_INFINITY || rl.rlim_max > OPEN_MAX)
+                    ? OPEN_MAX
+                    : rl.rlim_max;
+  if (want <= rl.rlim_cur)
+    return;
+  rl.rlim_cur = want;
+  if (setrlimit(RLIMIT_NOFILE, &rl) != 0)
+    boot_log("main: setrlimit(NOFILE, %llu) failed errno=%d", (unsigned long long)want, errno);
+  else
+    boot_log("main: fd soft limit raised to %llu", (unsigned long long)want);
+}
+
 int main(int argc, char *argv[]) {
   @autoreleasepool {
     boot_log_rotate_if_needed();
+    lift_fd_limit();
     // Bootstrap: if running from install path and a cached update exists, exec
     // it
     const char *selfPath = self_executable_path();

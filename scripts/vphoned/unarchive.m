@@ -2,6 +2,8 @@
 
 #include <archive.h>
 #include <archive_entry.h>
+#include <errno.h>
+#include <string.h>
 
 static int copy_data(struct archive *ar, struct archive *aw) {
     const void *buff;
@@ -69,7 +71,7 @@ int vp_extract_archive(NSString *archivePath, NSString *extractionPath, NSString
         if (r < ARCHIVE_OK)
             NSLog(@"vphoned: archive_write_header(%@): %s (r=%d)", currentFile, archive_error_string(ext), r);
         if (r < ARCHIVE_WARN) {
-            if (errorOutput) *errorOutput = [NSString stringWithFormat:@"archive_write_header failed for %@: %s", currentFile, archive_error_string(ext)];
+            if (errorOutput) *errorOutput = [NSString stringWithFormat:@"archive_write_header failed for %@: %s (errno %d: %s)", currentFile, archive_error_string(ext), archive_errno(ext), strerror(archive_errno(ext))];
             ret = 1; goto cleanup;
         }
         if (archive_entry_size(entry) > 0) {
@@ -77,7 +79,7 @@ int vp_extract_archive(NSString *archivePath, NSString *extractionPath, NSString
             if (r < ARCHIVE_OK)
                 NSLog(@"vphoned: copy_data(%@): %s (r=%d)", currentFile, archive_error_string(ext), r);
             if (r < ARCHIVE_WARN) {
-                if (errorOutput) *errorOutput = [NSString stringWithFormat:@"copy_data failed for %@: %s", currentFile, archive_error_string(ext)];
+                if (errorOutput) *errorOutput = [NSString stringWithFormat:@"copy_data failed for %@: %s (errno %d: %s)", currentFile, archive_error_string(ext), archive_errno(ext), strerror(archive_errno(ext))];
                 ret = 1; goto cleanup;
             }
         }
@@ -86,7 +88,7 @@ int vp_extract_archive(NSString *archivePath, NSString *extractionPath, NSString
         if (r < ARCHIVE_OK)
             NSLog(@"vphoned: archive_write_finish_entry(%@): %s (r=%d)", currentFile, archive_error_string(ext), r);
         if (r < ARCHIVE_WARN) {
-            if (errorOutput) *errorOutput = [NSString stringWithFormat:@"archive_write_finish_entry failed for %@: %s", currentFile, archive_error_string(ext)];
+            if (errorOutput) *errorOutput = [NSString stringWithFormat:@"archive_write_finish_entry failed for %@: %s (errno %d: %s)", currentFile, archive_error_string(ext), archive_errno(ext), strerror(archive_errno(ext))];
             ret = 1; goto cleanup;
         }
     }

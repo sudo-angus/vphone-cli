@@ -57,6 +57,7 @@ struct archive_entry;
 #define ARCHIVE_EXTRACT_SECURE_NOABSOLUTEPATHS 0x10000
 
 /* Error string */
+int archive_errno(struct archive *);
 const char *archive_error_string(struct archive *);
 
 /* Read API */
