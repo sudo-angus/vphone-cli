@@ -243,6 +243,11 @@ bundle: build $(INFO_PLIST)
 	@cp -f $(INFO_PLIST) $(BUNDLE)/Contents/Info.plist
 	@cp -f sources/AppIcon.icns $(BUNDLE)/Contents/Resources/AppIcon.icns
 	@cp -f $(SCRIPTS)/vphoned/signcert.p12 $(BUNDLE)/Contents/Resources/signcert.p12
+	@# VPhoneResources resolves a bundled binary's assets under Resources/scripts/…
+	@# (build.sh mirrors the whole tree); mirror the one asset the boot path
+	@# reads at runtime so IPA install keeps its signing cert with a make-built app.
+	@mkdir -p $(BUNDLE)/Contents/Resources/scripts/vphoned
+	@cp -f $(SCRIPTS)/vphoned/signcert.p12 $(BUNDLE)/Contents/Resources/scripts/vphoned/signcert.p12
 	@cp -f $$(command -v ldid) $(BUNDLE)/Contents/MacOS/ldid
 	@codesign --force --sign - $(BUNDLE)/Contents/MacOS/ldid
 	@codesign --force --sign - --entitlements $(ENTITLEMENTS) $(BUNDLE_BIN)
@@ -253,7 +258,7 @@ bundle: build $(INFO_PLIST)
 # virtualization entitlements so AMFI always lets it launch (so it can start
 # amfidont); it supervises the entitled boot binary from `bundle`.
 .PHONY: manager_app manage
-manager_app: bundle $(MANAGER_INFO_PLIST)
+manager_app: bundle vphoned $(MANAGER_INFO_PLIST)
 	@mkdir -p $(MANAGER_BUNDLE)/Contents/MacOS $(MANAGER_BUNDLE)/Contents/Resources
 	@cp -f $(BINARY) $(MANAGER_BUNDLE_BIN)
 	@cp -f $(MANAGER_INFO_PLIST) $(MANAGER_BUNDLE)/Contents/Info.plist
@@ -365,17 +370,25 @@ uninstall_app:
 
 # Cross-compile + sign vphoned daemon for iOS arm64 (requires ldid)
 .PHONY: vphoned
+# The signed daemon is staged at .build/vphoned.signed — where VPhoneResources'
+# dev layout (and the manager, before every boot) looks for it — and mirrored
+# into $(VM_DIR) for a plain `make boot` when that directory exists.
 vphoned:
 	@command -v ldid >/dev/null 2>&1 \
 		|| (echo "Error: ldid not found. Run: brew install ldid-procursus" && exit 1)
 	$(MAKE) -C $(SCRIPTS)/vphoned GIT_HASH=$(GIT_HASH)
 	@echo "=== Signing vphoned ==="
-	cp $(SCRIPTS)/vphoned/vphoned $(VM_DIR)/.vphoned.signed
+	@mkdir -p .build
+	cp $(SCRIPTS)/vphoned/vphoned .build/vphoned.signed
 	ldid \
 		-S$(SCRIPTS)/vphoned/entitlements.plist \
 		-M "-K$(SCRIPTS)/vphoned/signcert.p12" \
-		$(VM_DIR)/.vphoned.signed
-	@echo "  signed → $(VM_DIR)/.vphoned.signed"
+		.build/vphoned.signed
+	@echo "  signed → .build/vphoned.signed"
+	@if [ -d "$(VM_DIR)" ]; then \
+		cp -f .build/vphoned.signed "$(VM_DIR)/.vphoned.signed"; \
+		echo "  staged → $(VM_DIR)/.vphoned.signed"; \
+	fi
 
 # ═══════════════════════════════════════════════════════════════════
 # VM management

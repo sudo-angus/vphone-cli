@@ -105,6 +105,15 @@ final class VPhoneSupervisor {
             throw VPhoneManagerError.logOpenFailed(logURL.path)
         }
 
+        // Stage the current guest daemon next to config.plist: the boot child's
+        // auto-update reads `./.vphoned.signed` (its --vphoned-bin default) and
+        // pushes it into the guest on connect. `make vphoned` leaves the signed
+        // build at .build/vphoned.signed; bundles created by `vm create` in the
+        // library have nothing there until it is copied in.
+        if let note = Self.stageVphoned(into: vm.dirURL, repoRoot: repoRoot) {
+            vm.log.appendChunk(note + "\n")
+        }
+
         let process = Process()
         process.executableURL = executableURL
         process.arguments = args
@@ -160,6 +169,23 @@ final class VPhoneSupervisor {
         vm.usingTCPWorkaround = useTCP
         vm.runState = .starting
         vm.health = .starting
+    }
+
+    nonisolated private static func stageVphoned(into vmDir: URL, repoRoot: URL) -> String? {
+        let fm = FileManager.default
+        let src = repoRoot.appendingPathComponent(".build/vphoned.signed")
+        guard fm.fileExists(atPath: src.path) else { return nil }
+        let dst = vmDir.appendingPathComponent(".vphoned.signed")
+        if let a = fm.contents(atPath: src.path), let b = fm.contents(atPath: dst.path), a == b {
+            return nil
+        }
+        do {
+            if fm.fileExists(atPath: dst.path) { try fm.removeItem(at: dst) }
+            try fm.copyItem(at: src, to: dst)
+            return "[manager] staged the current vphoned build as .vphoned.signed"
+        } catch {
+            return "[manager] could not stage vphoned: \(error.localizedDescription)"
+        }
     }
 
     // MARK: - Stop
