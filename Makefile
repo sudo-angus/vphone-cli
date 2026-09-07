@@ -8,16 +8,18 @@ VM_DIR      ?= vm
 # (e.g. external SSD) VM_DIR values. `abspath` leaves absolute paths intact
 # and joins relative ones against CURDIR — use this for the VM directory arg.
 VM_DIR_ABS  := $(abspath $(VM_DIR))
-CPU         ?= 8          # CPU cores (only used during vm_new)
-MEMORY      ?= 8192       # Memory in MB (only used during vm_new)
-DISK_SIZE   ?= 64         # Disk size in GB (only used during vm_new)
+# CPU cores, memory (MB), disk size (GB) — used only during vm_new.
+# NB: no inline comments on these `?=` lines — make would fold the trailing
+# whitespace into the value (e.g. CPU="8   ") and break numeric consumers.
+CPU         ?= 8
+MEMORY      ?= 8192
+DISK_SIZE   ?= 64
 BACKUPS_DIR ?= vm.backups
 NAME        ?=
 BACKUP_INCLUDE_IPSW ?= 0
 FORCE       ?= 0
 RESTORE_UDID ?=           # UDID for restore operations
 RESTORE_ECID ?=           # ECID for restore operations
-IRECOVERY_ECID ?=         # ECID for ramdisk send operations
 
 # ─── Build info ──────────────────────────────────────────────────
 GIT_HASH    := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
@@ -66,13 +68,6 @@ help:
 	@echo "             SPOOF_BUILD=<id>          (EXP only) Rewrite ProductBuildVersion in SystemVersion.plist to <id>"
 	@echo "                                       e.g. SPOOF_BUILD=23F77 makes Settings -> About show that build."
 	@echo "                                       Omitted/empty -> EXP-JB-7 skipped, build version stays at the IPSW value."
-	@echo "  make setup_machine_prep              Prep half of setup_machine (deps + fw_patch + restore)."
-	@echo "                                       Stops before ramdisk_build so you can reboot the host"
-	@echo "                                       to clear mds/syspolicyd/amfid wedges if needed."
-	@echo "                                       Accepts the same JB/DEV/SKIP_PROJECT_SETUP/etc. options."
-	@echo "  make setup_machine_install           Install half of setup_machine (ramdisk_build + cfw_install"
-	@echo "                                       + first boot + analysis). Run after setup_machine_prep."
-	@echo "                                       Accepts the same JB/DEV options as the prep half."
 	@echo ""
 	@echo "Setup (one-time):"
 	@echo "  make setup_tools             Install all tools (brew, trustcache, insert_dylib, venv+pymobiledevice3)"
@@ -120,12 +115,19 @@ help:
 	@echo "             IPHONE_SOURCE=    URL or local path to iPhone IPSW"
 	@echo "             CLOUDOS_SOURCE=   URL or local path to cloudOS IPSW"
 	@echo "  make fw_patch                Patch boot chain with Swift pipeline (regular variant)"
+	@echo "    Options: FORCE_EXC_GUARD=1        Force the EXC_GUARD Mach-port-guard disable patch even on bases"
+	@echo "                                      that don't strictly need it to boot (e.g. a 3rd-party app's"
+	@echo "                                      crash-reporting SDK trips a fatal GUARD_TYPE_MACH_PORT violation)"
 	@echo "  make fw_patch_less           Patch boot chain with Swift pipeline (less patches)"
 	@echo "    Options: NO_BINPACK=1              Excludes the SSH, VNC, ... binaries from being installed"
 	@echo "             NO_VPHONED=1              Excludes vphoned from being installed"
 	@echo "  make fw_patch_dev            Patch boot chain with Swift pipeline (dev mode TXM patches)"
 	@echo "  make fw_patch_jb             Patch boot chain with Swift pipeline (dev + JB extensions)"
+	@echo "    Options: FORCE_EXC_GUARD=1        (see fw_patch above)"
+	@echo "             FRIDA=1                  Opt in to the Frida Stalker kernel relaxations"
 	@echo "  make fw_patch_exp            Patch boot chain with Swift pipeline (JB + EXP experimental)"
+	@echo "    Options: FORCE_EXC_GUARD=1        (see fw_patch above)"
+	@echo "             FRIDA=1                  Opt in to the Frida Stalker kernel relaxations"
 	@echo "  make fw_cache_list           List cached firmware in ipsws/ with per-firmware sizes"
 	@echo ""
 	@echo "Testing:"
@@ -141,15 +143,12 @@ help:
 	@echo "  make restore                 Restore to device (pymobiledevice3 backend)"
 	@echo "  make restore_offline         Restore offline — decrypts AEA images in place, uses cached .shsh blob"
 	@echo ""
-	@echo "Ramdisk:"
-	@echo "  make ramdisk_build           Build signed SSH ramdisk"
-	@echo "  make ramdisk_send            Send ramdisk to device"
-	@echo ""
-	@echo "CFW:"
-	@echo "  make cfw_install             Install CFW mods via SSH"
-	@echo "  make cfw_install_dev         Install CFW mods via SSH (dev mode)"
+	@echo "CFW (host-mount install; VM must be off, re-execs sudo):"
+	@echo "  make cfw_install             Install base CFW mods"
+	@echo "  make cfw_install_dev         Install CFW mods (dev mode)"
 	@echo "  make cfw_install_jb          Install CFW + JB extensions (jetsam/procursus/basebin)"
 	@echo "  make cfw_install_exp         Install CFW + JB + EXP experimental (hv_vmm rename, post-restore DT, build spoof)"
+	@echo "  make cfw_install_host        Select variant: VARIANT=regular|dev|jb|exp (default exp)  SPOOF_BUILD=<id> (exp)"
 	@echo ""
 	@echo "Variables: VM_DIR=$(VM_DIR) CPU=$(CPU) MEMORY=$(MEMORY) DISK_SIZE=$(DISK_SIZE)"
 
@@ -157,16 +156,9 @@ help:
 # Setup
 # ═══════════════════════════════════════════════════════════════════
 
-.PHONY: setup_machine setup_machine_prep setup_machine_install setup_tools
+.PHONY: setup_machine setup_tools
 
-# ── setup_machine variants ────────────────────────────────────────
-# All three targets share the same script + flag plumbing. Only the
-# --phase= value differs; the script itself enforces that --less is
-# incompatible with --phase=prep|install.
-
-# $(call setup_machine_run,PHASE) — run setup_machine.sh with the given
-# phase value. Used by the three .PHONY targets below.
-define setup_machine_run
+setup_machine:
 	@if count=0; \
 	  [ -n "$(filter 1 true yes YES TRUE,$(JB))" ] && count=$$((count+1)); \
 	  [ -n "$(filter 1 true yes YES TRUE,$(DEV))" ] && count=$$((count+1)); \
@@ -182,27 +174,11 @@ define setup_machine_run
 	NO_VPHONED="$(NO_VPHONED)" \
 	SPOOF_BUILD="$(SPOOF_BUILD)" \
 	zsh $(SCRIPTS)/setup_machine.sh \
-		--phase=$(1) \
 		$(if $(filter 1 true yes YES TRUE,$(JB)),--jb,) \
 		$(if $(filter 1 true yes YES TRUE,$(DEV)),--dev,) \
 		$(if $(filter 1 true yes YES TRUE,$(EXP)),--exp,) \
 		$(if $(filter 1 true yes YES TRUE,$(LESS)),--less,) \
 		$(if $(filter 1 true yes YES TRUE,$(SKIP_PROJECT_SETUP)),--skip-project-setup,)
-endef
-
-setup_machine:
-	$(call setup_machine_run,all)
-
-# Prep half — runs project setup, firmware prep/patch, and DFU restore,
-# then stops. Designed so the user can reboot the host before the heavy
-# ldid + DMG work in setup_machine_install.
-setup_machine_prep:
-	$(call setup_machine_run,prep)
-
-# Install half — assumes setup_machine_prep already populated vm/. The
-# script's preflight will error early if firmware artifacts are missing.
-setup_machine_install:
-	$(call setup_machine_run,install)
 
 setup_tools:
 	VARIANT=$(VARIANT) zsh $(SCRIPTS)/setup_tools.sh
@@ -267,6 +243,11 @@ bundle: build $(INFO_PLIST)
 	@cp -f $(INFO_PLIST) $(BUNDLE)/Contents/Info.plist
 	@cp -f sources/AppIcon.icns $(BUNDLE)/Contents/Resources/AppIcon.icns
 	@cp -f $(SCRIPTS)/vphoned/signcert.p12 $(BUNDLE)/Contents/Resources/signcert.p12
+	@# VPhoneResources resolves a bundled binary's assets under Resources/scripts/…
+	@# (build.sh mirrors the whole tree); mirror the one asset the boot path
+	@# reads at runtime so IPA install keeps its signing cert with a make-built app.
+	@mkdir -p $(BUNDLE)/Contents/Resources/scripts/vphoned
+	@cp -f $(SCRIPTS)/vphoned/signcert.p12 $(BUNDLE)/Contents/Resources/scripts/vphoned/signcert.p12
 	@cp -f $$(command -v ldid) $(BUNDLE)/Contents/MacOS/ldid
 	@codesign --force --sign - $(BUNDLE)/Contents/MacOS/ldid
 	@codesign --force --sign - --entitlements $(ENTITLEMENTS) $(BUNDLE_BIN)
@@ -277,7 +258,7 @@ bundle: build $(INFO_PLIST)
 # virtualization entitlements so AMFI always lets it launch (so it can start
 # amfidont); it supervises the entitled boot binary from `bundle`.
 .PHONY: manager_app manage
-manager_app: bundle $(MANAGER_INFO_PLIST)
+manager_app: bundle vphoned $(MANAGER_INFO_PLIST)
 	@mkdir -p $(MANAGER_BUNDLE)/Contents/MacOS $(MANAGER_BUNDLE)/Contents/Resources
 	@cp -f $(BINARY) $(MANAGER_BUNDLE_BIN)
 	@cp -f $(MANAGER_INFO_PLIST) $(MANAGER_BUNDLE)/Contents/Info.plist
@@ -389,17 +370,25 @@ uninstall_app:
 
 # Cross-compile + sign vphoned daemon for iOS arm64 (requires ldid)
 .PHONY: vphoned
+# The signed daemon is staged at .build/vphoned.signed — where VPhoneResources'
+# dev layout (and the manager, before every boot) looks for it — and mirrored
+# into $(VM_DIR) for a plain `make boot` when that directory exists.
 vphoned:
 	@command -v ldid >/dev/null 2>&1 \
 		|| (echo "Error: ldid not found. Run: brew install ldid-procursus" && exit 1)
 	$(MAKE) -C $(SCRIPTS)/vphoned GIT_HASH=$(GIT_HASH)
 	@echo "=== Signing vphoned ==="
-	cp $(SCRIPTS)/vphoned/vphoned $(VM_DIR)/.vphoned.signed
+	@mkdir -p .build
+	cp $(SCRIPTS)/vphoned/vphoned .build/vphoned.signed
 	ldid \
 		-S$(SCRIPTS)/vphoned/entitlements.plist \
 		-M "-K$(SCRIPTS)/vphoned/signcert.p12" \
-		$(VM_DIR)/.vphoned.signed
-	@echo "  signed → $(VM_DIR)/.vphoned.signed"
+		.build/vphoned.signed
+	@echo "  signed → .build/vphoned.signed"
+	@if [ -d "$(VM_DIR)" ]; then \
+		cp -f .build/vphoned.signed "$(VM_DIR)/.vphoned.signed"; \
+		echo "  staged → $(VM_DIR)/.vphoned.signed"; \
+	fi
 
 # ═══════════════════════════════════════════════════════════════════
 # VM management
@@ -409,7 +398,7 @@ vphoned:
 
 vm_new:
 	CPU="$(CPU)" MEMORY="$(MEMORY)" \
-	zsh $(SCRIPTS)/vm_create.sh --dir $(VM_DIR) --disk-size $(DISK_SIZE)
+	zsh $(SCRIPTS)/vm_create.sh --dir "$(VM_DIR)" --disk-size $(DISK_SIZE)
 
 vm_backup:
 	VM_DIR="$(VM_DIR)" BACKUPS_DIR="$(BACKUPS_DIR)" NAME="$(NAME)" BACKUP_INCLUDE_IPSW="$(BACKUP_INCLUDE_IPSW)" \
@@ -478,17 +467,17 @@ boot_binary_check: $(BINARY)
 	$(call BOOT_BINARY_CHECK,--assert-bootable)
 
 boot: bundle vphoned boot_binary_check
-	cd $(VM_DIR) && "$(CURDIR)/$(BUNDLE_BIN)" \
+	cd "$(VM_DIR)" && "$(CURDIR)/$(BUNDLE_BIN)" \
 		--config ./config.plist $(EXTRA_ARGS)
 
-boot_less: bundle vphoned boot_binary_check_less
-	cd $(VM_DIR) && "$(CURDIR)/$(BUNDLE_BIN)" \
+boot_less: bundle boot_binary_check_less
+	cd "$(VM_DIR)" && "$(CURDIR)/$(BUNDLE_BIN)" \
 		--config ./config.plist \
 		--variant less \
 		$(if $(filter 1 true yes YES TRUE,$(NO_VPHONED)),--no-vphoned,)
 
 boot_dfu: build boot_binary_check
-	cd $(VM_DIR) && "$(CURDIR)/$(BINARY)" \
+	cd "$(VM_DIR)" && "$(CURDIR)/$(BINARY)" \
 		--config ./config.plist \
 		--dfu
 
@@ -499,10 +488,11 @@ boot_dfu: build boot_binary_check
 .PHONY: fw_prepare fw_patch fw_patch_less fw_patch_dev fw_patch_jb
 
 fw_prepare:
-	cd $(VM_DIR) && bash "$(CURDIR)/$(SCRIPTS)/fw_prepare.sh"
+	cd "$(VM_DIR)" && bash "$(CURDIR)/$(SCRIPTS)/fw_prepare.sh"
 
 fw_patch: patcher_build
-	"$(CURDIR)/$(PATCHER_BINARY)" patch-firmware --vm-directory "$(VM_DIR_ABS)" --variant regular
+	"$(CURDIR)/$(PATCHER_BINARY)" patch-firmware --vm-directory "$(VM_DIR_ABS)" --variant regular \
+	$(if $(filter 1 true yes YES TRUE,$(FORCE_EXC_GUARD)),--force-exc-guard,)
 
 UID := $(shell id -u)
 ifeq ($(UID),0)
@@ -521,10 +511,14 @@ fw_patch_dev: patcher_build
 	"$(CURDIR)/$(PATCHER_BINARY)" patch-firmware --vm-directory "$(VM_DIR_ABS)" --variant dev
 
 fw_patch_jb: patcher_build
-	"$(CURDIR)/$(PATCHER_BINARY)" patch-firmware --vm-directory "$(VM_DIR_ABS)" --variant jb
+	"$(CURDIR)/$(PATCHER_BINARY)" patch-firmware --vm-directory "$(VM_DIR_ABS)" --variant jb \
+	$(if $(filter 1 true yes YES TRUE,$(FORCE_EXC_GUARD)),--force-exc-guard,) \
+	$(if $(filter 1 true yes YES TRUE,$(FRIDA)),--frida,)
 
 fw_patch_exp: patcher_build
-	"$(CURDIR)/$(PATCHER_BINARY)" patch-firmware --vm-directory "$(VM_DIR_ABS)" --variant exp
+	"$(CURDIR)/$(PATCHER_BINARY)" patch-firmware --vm-directory "$(VM_DIR_ABS)" --variant exp \
+	$(if $(filter 1 true yes YES TRUE,$(FORCE_EXC_GUARD)),--force-exc-guard,) \
+	$(if $(filter 1 true yes YES TRUE,$(FRIDA)),--frida,)
 
 .PHONY: test_jb_patches
 
@@ -625,32 +619,25 @@ restore_offline:
 		--ecid "$$ECID"
 
 # ═══════════════════════════════════════════════════════════════════
-# Ramdisk
-# ═══════════════════════════════════════════════════════════════════
-
-.PHONY: ramdisk_build ramdisk_send
-
-ramdisk_build: patcher_build
-	cd $(VM_DIR) && RAMDISK_UDID="$(RAMDISK_UDID)" $(PYTHON) "$(CURDIR)/$(SCRIPTS)/ramdisk_build.py" .
-
-ramdisk_send:
-	cd $(VM_DIR) && PMD3_BRIDGE="$(PMD3_BRIDGE)" PYTHON="$(PYTHON)" IRECOVERY_ECID="$(IRECOVERY_ECID)" RAMDISK_UDID="$(RAMDISK_UDID)" RESTORE_UDID="$(RESTORE_UDID)" \
-		zsh "$(CURDIR)/$(SCRIPTS)/ramdisk_send.sh"
-
-# ═══════════════════════════════════════════════════════════════════
 # CFW
 # ═══════════════════════════════════════════════════════════════════
 
-.PHONY: cfw_install cfw_install_dev cfw_install_jb cfw_install_exp
+.PHONY: cfw_install cfw_install_dev cfw_install_jb cfw_install_exp cfw_install_host
 
 cfw_install:
-	cd $(VM_DIR) && $(if $(SSH_PORT),SSH_PORT="$(SSH_PORT)") _VPHONE_PATH="$$PATH" zsh "$(CURDIR)/$(SCRIPTS)/cfw_install.sh" .
+	$(MAKE) cfw_install_host VARIANT=regular
 
 cfw_install_dev:
-	cd $(VM_DIR) && $(if $(SSH_PORT),SSH_PORT="$(SSH_PORT)") _VPHONE_PATH="$$PATH" zsh "$(CURDIR)/$(SCRIPTS)/cfw_install_dev.sh" .
+	$(MAKE) cfw_install_host VARIANT=dev
 
 cfw_install_jb:
-	cd $(VM_DIR) && $(if $(SSH_PORT),SSH_PORT="$(SSH_PORT)") _VPHONE_PATH="$$PATH" zsh "$(CURDIR)/$(SCRIPTS)/cfw_install_jb.sh" .
+	$(MAKE) cfw_install_host VARIANT=jb FRIDA="$(FRIDA)"
 
 cfw_install_exp:
-	cd $(VM_DIR) && $(if $(SSH_PORT),SSH_PORT="$(SSH_PORT)") $(if $(SPOOF_BUILD),SPOOF_BUILD="$(SPOOF_BUILD)") _VPHONE_PATH="$$PATH" zsh "$(CURDIR)/$(SCRIPTS)/cfw_install_exp.sh" .
+	$(MAKE) cfw_install_host VARIANT=exp SPOOF_BUILD="$(SPOOF_BUILD)" FRIDA="$(FRIDA)"
+
+# CFW install: place files via host mount + flip the boot snapshot offline.
+# VM must be off; re-execs under sudo.
+#   Options: VARIANT=regular|dev|jb|exp (default exp)  SPOOF_BUILD=<id> (exp)
+cfw_install_host:
+	$(if $(SPOOF_BUILD),SPOOF_BUILD="$(SPOOF_BUILD)") $(if $(filter 1 true yes YES TRUE,$(FRIDA)),VPHONE_FRIDA=1) zsh "$(CURDIR)/$(SCRIPTS)/cfw_install_host.sh" --variant $(if $(VARIANT),$(VARIANT),exp) "$(VM_DIR_ABS)"

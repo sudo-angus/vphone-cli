@@ -4,7 +4,7 @@ private func tr(_ en: String, _ zh: String) -> String { VPhoneL10n.tr(en, zh) }
 
 /// The "New VM" wizard. Three states: a configuration step (name, variant,
 /// hardware, iOS firmware), a progress step that tracks the orchestration
-/// engine's phases while `setup_machine` runs, and a completion step that
+/// engine's phases while `vm create` runs, and a completion step that
 /// walks the user through the first boot.
 struct VPhoneCreateWizardView: View {
     @Bindable var model: VPhoneCreateModel
@@ -31,7 +31,7 @@ struct VPhoneCreateWizardView: View {
                 Section("Name") {
                     TextField("Display name", text: $model.name)
                     LabeledContent("Folder") {
-                        Text("vms/\(model.slug)")
+                        Text(model.targetDisplayPath)
                             .font(.system(size: 12, design: .monospaced))
                             .foregroundStyle(.secondary)
                     }
@@ -42,7 +42,7 @@ struct VPhoneCreateWizardView: View {
                 }
                 Section("Variant") {
                     Picker("Firmware variant", selection: $model.variant) {
-                        ForEach(VPhoneCreateModel.Variant.allCases) { v in Text(v.label).tag(v) }
+                        ForEach(VPhoneCreateModel.Variant.wizardChoices) { v in Text(v.label).tag(v) }
                     }
                     Text(model.variant.blurb).font(.caption).foregroundStyle(.secondary)
                 }
@@ -67,7 +67,7 @@ struct VPhoneCreateWizardView: View {
                                     .tag(Optional(fw))
                             }
                         }
-                        Text("“Supported” = in the project's tested matrix, with the Mac it was tested on — only an actual boot + connect confirms a build works on yours. “cached” = IPSW already downloaded.")
+                        Text("Each build is paired with the cloudOS image the project recommends for it. “Tested” = in the project's tested matrix, with the Mac it was tested on — only an actual boot + connect confirms a build works on yours. “cached” = IPSW already downloaded.")
                             .font(.caption).foregroundStyle(.tertiary)
                     }
                 }
@@ -98,7 +98,7 @@ struct VPhoneCreateWizardView: View {
             HStack(spacing: 8) {
                 Text("Creating “\(model.name)”").font(.headline)
                 Spacer()
-                Text("vms/\(model.slug)")
+                Text(model.targetDisplayPath)
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundStyle(.secondary)
             }
@@ -160,7 +160,7 @@ struct VPhoneCreateWizardView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(tr("“\(model.name)” is ready", "「\(model.name)」已创建完成"))
                         .font(.headline)
-                    Text("vms/\(model.slug)")
+                    Text(model.targetDisplayPath)
                         .font(.system(size: 11, design: .monospaced))
                         .foregroundStyle(.secondary)
                 }

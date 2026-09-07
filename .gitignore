@@ -218,6 +218,7 @@ ipython_config.py
 
 # Local scratch planning
 TODO.md
+.superpowers/
 
 # PEP 582; used by e.g. github.com/David-OConnor/pyflow and github.com/pdm-project/pdm
 __pypackages__/
@@ -333,3 +334,5 @@ setup_logs/
 /vm
 /vm.backups
 /vms
+/vm-*/
+/debs/

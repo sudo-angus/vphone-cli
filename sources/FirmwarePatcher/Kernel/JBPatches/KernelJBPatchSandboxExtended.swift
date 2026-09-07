@@ -29,8 +29,10 @@ extension KernelJBPatcher {
             return false
         }
 
-        // Extended hook index table (name → ops slot index).
-        let hookIndices: [(String, Int)] = [
+        // Extended hook index table (name → ops slot index). Entries 201..316 are the
+        // base JB sandbox bypass and apply on every JB base; the iOS-27-only
+        // syscall-unix entry (124) is appended below, gated on applyIOS27.
+        var hookIndices: [(String, Int)] = [
             ("iokit_check_201", 201),
             ("iokit_check_202", 202),
             ("iokit_check_203", 203),
@@ -55,7 +57,7 @@ extension KernelJBPatcher {
             ("vnode_check_ioctl", 261),
             ("vnode_check_link", 264),
             ("vnode_check_listextattr", 265),
-            ("vnode_check_open", 267),
+            // vnode_check_open (267) is appended conditionally below.
             ("vnode_check_readlink", 270),
             ("vnode_check_setattrlist", 275),
             ("vnode_check_setextattr", 276),
@@ -68,6 +70,24 @@ extension KernelJBPatcher {
             ("vnode_check_unlink", 283),
             ("vnode_check_fsgetpath", 316),
         ]
+
+        // iOS-27-only: mpo_proc_check_syscall_unix[124] → allow lets the mount_apfs that
+        // MobileStorageMounter spawns make the mount(2) syscall (unix 167) for the iOS-27
+        // personalized DDI (/System/Developer). Gated so a 26.x base keeps its syscall-unix
+        // MAC filter intact (else kernel Sandbox: "Protobox: mount_apfs deny(1) syscall-unix
+        // 167"). Index 124 is calibrated against this kernel's mac_policy_ops layout: the
+        // vnode_check_open==267 / vnode_check_fsgetpath==316 entries above match the
+        // reference XNU struct order exactly, so mpo_proc_check_syscall_unix==124 holds.
+        if applyIOS27 {
+            hookIndices.append(("proc_check_syscall_unix", 124))
+        }
+
+        // On iOS 27, leave ops[267] real so KernelJBPatchFpfsScopedOpen can retarget it to a
+        // FileProvider-scoped trampoline (the fpfs walk needs the stock check as its terminus,
+        // else ResolverService balloons → respring). Neuter it as usual on every other base.
+        if !applyIOS27 {
+            hookIndices.append(("vnode_check_open", 267))
+        }
 
         var patched = 0
         for (hookName, idx) in hookIndices {

@@ -492,7 +492,7 @@ struct VPhoneManagerView: View {
             } label: {
                 Label("New VM…", systemImage: "plus")
             }
-            .help("Create a new vPhone in vms/ (firmware download → restore → CFW).")
+            .help("Create a new vPhone in the VM library (download → patch → restore → CFW → first boot).")
         }
     }
 }

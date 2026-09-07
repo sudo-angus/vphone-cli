@@ -1,7 +1,7 @@
 #!/bin/bash
 # vphone_jb_setup.sh — First-boot JB finalization script.
 #
-# Deployed to /cores/ during cfw_install_jb.sh (ramdisk phase).
+# Deployed to /cores/ during cfw_install_jb.sh.
 # Runs automatically via LaunchDaemon on first normal boot.
 # Idempotent — safe to re-run on subsequent boots.
 #
@@ -92,11 +92,36 @@ fi
 # ═══════════ 2/7 FIX OWNERSHIP / PERMISSIONS ═════════════════
 log "[2/8] Fixing mobile Library ownership..."
 mkdir -p /var/jb/var/mobile/Library/Preferences
+mkdir -p /var/jb/Library/MobileSubstrate/DynamicLibraries
 chown -R 501:501 /var/jb/var/mobile/Library
 chmod 0755 /var/jb/var/mobile/Library
 chown -R 501:501 /var/jb/var/mobile/Library/Preferences
 chmod 0755 /var/jb/var/mobile/Library/Preferences
+chown 0:0 /var/jb/Library /var/jb/Library/MobileSubstrate /var/jb/Library/MobileSubstrate/DynamicLibraries
+chmod 0755 /var/jb/Library /var/jb/Library/MobileSubstrate /var/jb/Library/MobileSubstrate/DynamicLibraries
 log "  Ownership set"
+
+log "[2a/8] Preparing dropbear host keys..."
+mkdir -p /var/dropbear
+DROPBEARKEY=""
+for p in /iosbinpack64/usr/local/bin/dropbearkey /iosbinpack64/usr/local/dropbearkey /var/jb/usr/bin/dropbearkey; do
+    [ -x "$p" ] && DROPBEARKEY="$p" && break
+done
+if [ -n "$DROPBEARKEY" ]; then
+    [ -f /var/dropbear/dropbear_rsa_host_key ] || "$DROPBEARKEY" -t rsa -f /var/dropbear/dropbear_rsa_host_key >/dev/null
+    [ -f /var/dropbear/dropbear_ecdsa_host_key ] || "$DROPBEARKEY" -t ecdsa -f /var/dropbear/dropbear_ecdsa_host_key >/dev/null
+    if [ -f /var/dropbear/dropbear_rsa_host_key ] && [ -f /var/dropbear/dropbear_ecdsa_host_key ]; then
+        if chmod 0600 /var/dropbear/dropbear_rsa_host_key /var/dropbear/dropbear_ecdsa_host_key; then
+            log "  dropbear host keys ready"
+        else
+            log "  WARNING: dropbear host key chmod failed"
+        fi
+    else
+        log "  WARNING: dropbear host key generation incomplete"
+    fi
+else
+    log "  WARNING: dropbearkey not found"
+fi
 
 # ═══════════ 3/7 RUN prep_bootstrap.sh ═══════════════════════
 log "[3/8] Running prep_bootstrap.sh..."
@@ -146,6 +171,44 @@ else
     fi
 fi
 
+# ═══════════ 5b/8 INSTALL EXTRA DEBS ═════════════════════════
+log "[5b/8] Installing extra debs..."
+DEBS_DIR="/private/preboot/$BOOT_HASH/debs"
+if [ -d "$DEBS_DIR" ]; then
+    to_install=()
+    for deb in "$DEBS_DIR"/*.deb; do
+        [ -f "$deb" ] || continue
+        name="$(basename "$deb")"
+        pkg="$(dpkg-deb -f "$deb" Package 2>/dev/null)"
+        ver="$(dpkg-deb -f "$deb" Version 2>/dev/null)"
+        if [ -z "$pkg" ]; then
+            log "  WARNING: cannot read Package field from $name, will install anyway"
+            to_install+=("$deb")
+            continue
+        fi
+        cur="$(dpkg-query -W -f='${Version}' "$pkg" 2>/dev/null)"
+        if [ -n "$cur" ] && dpkg --compare-versions "$cur" ge "$ver" 2>/dev/null; then
+            log "  $pkg $cur already installed (>= $ver), skipping"
+        else
+            to_install+=("$deb")
+        fi
+    done
+    if [ "${#to_install[@]}" -gt 0 ]; then
+        names="$(for d in "${to_install[@]}"; do basename "$d"; done | tr '\n' ' ')"
+        log "  Installing ${#to_install[@]} deb(s): $names"
+        if dpkg -i "${to_install[@]}"; then
+            log "  Extra debs installed"
+        else
+            rc=$?
+            log "  WARNING: dpkg -i exited with $rc (unmet external deps are non-fatal)"
+        fi
+    else
+        log "  All extra debs already installed, nothing to do"
+    fi
+else
+    log "  No extra debs staged"
+fi
+
 uicache -a 2>/dev/null || true
 log "  uicache refreshed"
 
@@ -166,6 +229,15 @@ else
     log "  Havoc source already present"
 fi
 
+FRIDA_LIST="$(dirname "$HAVOC_LIST")/frida.list"
+if ! grep -rIl 'build.frida.re' /etc/apt /var/jb/etc/apt 2>/dev/null | grep -q .; then
+    mkdir -p "$(dirname "$FRIDA_LIST")"
+    printf '%s\n' 'deb https://build.frida.re/ ./' > "$FRIDA_LIST"
+    log "  Frida source added: $FRIDA_LIST"
+else
+    log "  Frida source already present"
+fi
+
 apt-get -o Acquire::AllowInsecureRepositories=true \
     -o Acquire::AllowDowngradeToInsecureRepositories=true \
     update -qq 2>&1 || log "  apt update exited with $?"
@@ -181,24 +253,42 @@ log "  apt upgrade done"
 
 # ═══════════ 7/7 INSTALL TROLLSTORE LITE ═════════════════════
 log "[7/8] Installing TrollStore Lite..."
+TROLLSTORE_READY=0
 if dpkg -s com.opa334.trollstorelite >/dev/null 2>&1; then
     log "  TrollStore Lite already installed"
+    TROLLSTORE_READY=1
 else
     apt-get -o APT::Get::AllowUnauthenticated=true \
         install -y -qq com.opa334.trollstorelite 2>&1
     trollstore_rc=$?
     if [ "$trollstore_rc" -ne 0 ]; then
-        die "TrollStore Lite apt install failed with exit code $trollstore_rc"
-    fi
-    if dpkg -s com.opa334.trollstorelite >/dev/null 2>&1; then
-        log "  TrollStore Lite installed"
+        log "  WARNING: TrollStore Lite apt install failed with exit code $trollstore_rc"
     else
-        die "TrollStore Lite install completed without registering package"
+        if dpkg -s com.opa334.trollstorelite >/dev/null 2>&1; then
+            log "  TrollStore Lite installed"
+            TROLLSTORE_READY=1
+        else
+            log "  WARNING: TrollStore Lite install completed without registering package"
+        fi
     fi
 fi
 
 uicache -a 2>/dev/null || true
 log "  uicache refreshed"
+
+# iOS 27: -[LSApplicationWorkspace registerApplicationDictionary:] (what uicache -a
+# uses) is a deprecated no-op stub on 27, so uicache cannot register JB apps. Register
+# them via the containerized LS API instead (needs the lsd embedded-reg gate patch from
+# cfw_patch_lsd_embedded_reg). The 27 gate is the /cores/vpregister PRESENCE: it is
+# deployed only on a 27 base (cfw_install_jb.sh gates the deploy on the mounted
+# SystemVersion.plist), so a 26.x/18.x base has no /cores/vpregister and skips this.
+# Do NOT re-add a guest-side `sw_vers` version check here — the hybrid guest's sw_vers
+# does not reliably report the 27 userland version at first boot, which silently
+# skipped this step and left Sileo unregistered.
+if [ -x /cores/vpregister ]; then
+    log "  Registering JB apps via containerized LS API (iOS 27 path)..."
+    /cores/vpregister 2>&1 | while IFS= read -r vpr_line; do log "    $vpr_line"; done
+fi
 
 # ═══════════ 8/8 SHELL PROFILES FOR SSH ═══════════════════════
 log "[8/8] Setting up shell profiles for SSH..."
@@ -215,5 +305,9 @@ for profile in /var/root/.bashrc /var/root/.bash_profile; do
 done
 
 # ═══════════ DONE ════════════════════════════════════════════
-: > "$DONE_MARKER"
-log "=== vphone_jb_setup.sh complete ==="
+if [ "$TROLLSTORE_READY" = "1" ]; then
+    : > "$DONE_MARKER"
+    log "=== vphone_jb_setup.sh complete ==="
+else
+    log "=== vphone_jb_setup.sh core steps complete; TrollStore Lite still pending, marker not written ==="
+fi

@@ -156,6 +156,41 @@ struct ARM64EncoderTests {
         // `mov x0, x20` matches the project's preverified ARM64.movX0X20 constant.
         #expect(ARM64Encoder.encodeMovX(rd: 0, rm: 20) == ARM64.movX0X20)
     }
+
+    @Test func encodeTestBitBranchRoundTrips() throws {
+        // The vm_map_delete --frida patch retargets `tbz/tbnz w8,#9` to bit 13
+        // (current-protection.X → max_protection.X), preserving sense and target.
+        let tbz = try #require(ARM64Encoder.encodeTestBitBranch(
+            nonzero: false, register: 8, bit: 13, from: 0x1000, to: 0x1020))
+        let tbzI = try #require(disasm.disassembleOne(tbz, at: 0x1000))
+        #expect(tbzI.mnemonic == "tbz")
+        #expect(tbzI.operandString.contains("w8"))
+        #expect(tbzI.operandString.contains("#0xd"))
+        #expect(tbzI.operandString.contains("0x1020"))
+
+        let tbnz = try #require(ARM64Encoder.encodeTestBitBranch(
+            nonzero: true, register: 8, bit: 13, from: 0x2000, to: 0x1f00))
+        let tbnzI = try #require(disasm.disassembleOne(tbnz, at: 0x2000))
+        #expect(tbnzI.mnemonic == "tbnz")
+        #expect(tbnzI.operandString.contains("#0xd"))
+        #expect(tbnzI.operandString.contains("0x1f00"))
+
+        // Rejects bad register / bit / out-of-range target.
+        #expect(ARM64Encoder.encodeTestBitBranch(nonzero: false, register: 32, bit: 13, from: 0, to: 4) == nil)
+        #expect(ARM64Encoder.encodeTestBitBranch(nonzero: false, register: 8, bit: 64, from: 0, to: 4) == nil)
+        #expect(ARM64Encoder.encodeTestBitBranch(nonzero: false, register: 8, bit: 13, from: 0, to: 0x8000) == nil)
+    }
+
+    @Test func encodeMovzWClearsTSSFCheckEntitlement() throws {
+        // The thread_set_state --frida patch rewrites `mov w6, #0x201`
+        // (TSSF_TRANSLATE_TO_USER | TSSF_CHECK_ENTITLEMENT) to `mov w6, #0x1`,
+        // clearing only the entitlement bit while preserving user translation.
+        let bytes = try #require(ARM64Encoder.encodeMovzW(rd: 6, imm16: 0x1))
+        let insn = try #require(disasm.disassembleOne(bytes, at: 0))
+        #expect(insn.mnemonic == "mov" || insn.mnemonic == "movz")
+        #expect(insn.operandString.contains("w6"))
+        #expect(insn.operandString.contains("#1") || insn.operandString.contains("#0x1"))
+    }
 }
 
 /// Round-trip coverage for the shared raw-instruction predicates in `ARM64Inst`,
@@ -298,6 +333,99 @@ struct BinaryBufferTests {
     }
 }
 
+final class BytePatchPatcher: Patcher {
+    let component = "test"
+    let verbose = false
+    let data: Data
+    let offset: Int
+    let byte: UInt8
+    let id: String
+
+    init(data: Data, offset: Int, byte: UInt8, id: String) {
+        self.data = data
+        self.offset = offset
+        self.byte = byte
+        self.id = id
+    }
+
+    func findAll() throws -> [PatchRecord] {
+        [
+            PatchRecord(
+                patchID: id,
+                component: component,
+                fileOffset: offset,
+                originalBytes: Data([data[offset]]),
+                patchedBytes: Data([byte]),
+                description: id
+            ),
+        ]
+    }
+
+    func apply() throws -> Int { 1 }
+}
+
+struct FirmwarePipelineDataFlowTests {
+    @Test func chainedPatchersReceivePreviousPatchedBytes() throws {
+        let pipeline = FirmwarePipeline(
+            vmDirectory: URL(fileURLWithPath: NSTemporaryDirectory()),
+            verbose: false
+        )
+        var secondInput = Data()
+
+        let (patched, records) = try pipeline.patchData(
+            Data([0x00, 0x00]),
+            componentName: "test",
+            patcherFactories: [
+                { data, _ in
+                    BytePatchPatcher(data: data, offset: 0, byte: 0xAA, id: "first")
+                },
+                { data, _ in
+                    secondInput = data
+                    return BytePatchPatcher(data: data, offset: 1, byte: 0xBB, id: "second")
+                },
+            ]
+        )
+
+        #expect(secondInput == Data([0xAA, 0x00]))
+        #expect(patched == Data([0xAA, 0xBB]))
+        #expect(records.map(\.patchID) == ["first", "second"])
+    }
+}
+
+struct IBootPatcherIdempotencyTests {
+    @Test func serialLabelsPatchTwoBannerRunsWhenLabelAbsent() {
+        let banner = String(repeating: "=", count: 32)
+        let payload = Data("prefix \(banner) middle \(banner) suffix".utf8)
+        let patcher = IBootPatcher(data: payload, mode: .ibss, verbose: false)
+
+        patcher.patchSerialLabels()
+
+        #expect(patcher.patches.count == 2)
+        #expect(patcher.patches.allSatisfy {
+            String(data: $0.patchedBytes, encoding: .ascii) == "Loaded iBSS"
+        })
+    }
+
+    @Test func serialLabelsSkipWhenLabelAlreadyPresent() {
+        let payload = Data("Loaded iBSS\0 middle Loaded iBSS\0 suffix".utf8)
+        let patcher = IBootPatcher(data: payload, mode: .ibss, verbose: false)
+
+        patcher.patchSerialLabels()
+
+        #expect(patcher.patches.isEmpty)
+    }
+
+    @Test func serialLabelsDoNotSkipForUnrelatedSingleLabel() {
+        let banner = String(repeating: "=", count: 32)
+        let payload = Data("Loaded iBSS\0 prefix \(banner) middle \(banner) suffix".utf8)
+        let patcher = IBootPatcher(data: payload, mode: .ibss, verbose: false)
+
+        patcher.patchSerialLabels()
+
+        #expect(patcher.patches.count == 2)
+    }
+}
+
 struct IM4PPayloadParityTests {
     @Test func ibssIM4PPayloadMatchesRawAndJBPatcherFindsNoncePatch() throws {
         let baseDir = URL(fileURLWithPath: #filePath)
@@ -381,5 +509,18 @@ struct FirmwarePipelineTests {
         let found = try pipeline.findFile(in: tempDir, patterns: ["AVPBooter*.bin"], label: "AVPBooter")
 
         #expect(found == target)
+    }
+}
+
+struct FridaGatingTests {
+    @Test func cloudOSVersionGate() {
+        // Frida kernel patches apply on cloudOS 26.4+ only.
+        #expect(FirmwarePipeline.productVersionAtLeast("26.4", 26, 4))
+        #expect(FirmwarePipeline.productVersionAtLeast("26.5", 26, 4))
+        #expect(FirmwarePipeline.productVersionAtLeast("26.10", 26, 4))
+        #expect(FirmwarePipeline.productVersionAtLeast("27.0", 26, 4))
+        #expect(!FirmwarePipeline.productVersionAtLeast("26.3", 26, 4))
+        #expect(!FirmwarePipeline.productVersionAtLeast("18.5", 26, 4))
+        #expect(!FirmwarePipeline.productVersionAtLeast(nil, 26, 4))
     }
 }

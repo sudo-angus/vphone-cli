@@ -1,14 +1,17 @@
 #!/bin/zsh
-# cfw_install.sh — Install base CFW modifications on vphone via SSH ramdisk.
+# cfw_install.sh — Install base CFW modifications on vphone.
 #
 # Installs Cryptexes, patches system binaries, installs jailbreak tools
 # and configures LaunchDaemons for persistent SSH/VNC access.
+#
+# Files are placed directly on the VM's Disk.img volumes, which cfw_install_host.sh
+# attaches and mounts on the host; the VM must be off.
 #
 # Safe to run multiple times — always patches from original .bak files,
 # keeps decrypted Cryptex DMGs cached, handles already-mounted filesystems.
 #
 # Prerequisites:
-#   - Device booted into SSH ramdisk (make ramdisk_send)
+#   - VM restored (make restore) and powered off
 #   - `ipsw` tool installed (brew install blacktop/tap/ipsw)
 #   - `aea` tool available (macOS 12+)
 #   - Python: make setup_venv && source .venv/bin/activate
@@ -22,7 +25,6 @@ set -euo pipefail
 
 VM_DIR="${1:-.}"
 SCRIPT_DIR="${0:a:h}"
-CFW_SKIP_HALT="${CFW_SKIP_HALT:-0}"
 
 # Resolve absolute paths
 VM_DIR="$(cd "$VM_DIR" && pwd)"
@@ -34,6 +36,10 @@ VM_DIR="$(cd "$VM_DIR" && pwd)"
 # `make cfw_install` standalone (without setup_machine.sh exporting PATH)
 # still uses the correctly set-up venv interpreter.
 _resolve_python3() {
+    if [[ -n "${VPHONE_PYTHON:-}" ]]; then
+        echo "$VPHONE_PYTHON"
+        return
+    fi
     local venv_py="${SCRIPT_DIR:h}/.venv/bin/python3"
     if [[ -x "$venv_py" ]]; then
         echo "$venv_py"
@@ -48,22 +54,6 @@ CFW_INPUT="cfw_input"
 CFW_ARCHIVE="cfw_input.tar.zst"
 TEMP_DIR="$VM_DIR/.cfw_temp"
 
-SSH_PORT="${SSH_PORT:-2222}"
-SSH_PASS="alpine"
-SSH_USER="root"
-SSH_HOST="localhost"
-SSH_RETRY="${SSH_RETRY:-3}"
-CFW_SSH_READY_TIMEOUT="${CFW_SSH_READY_TIMEOUT:-60}"
-CFW_SSH_READY_INTERVAL="${CFW_SSH_READY_INTERVAL:-2}"
-SSHPASS_BIN=""
-SSH_OPTS=(
-    -o StrictHostKeyChecking=no
-    -o UserKnownHostsFile=/dev/null
-    -o PreferredAuthentications=password
-    -o ConnectTimeout=30
-    -q
-)
-
 # ── Helpers ─────────────────────────────────────────────────────
 die() {
     echo "[-] $*" >&2
@@ -72,75 +62,10 @@ die() {
 
 check_prerequisites() {
     local missing=()
-    command -v sshpass &>/dev/null || missing+=("sshpass")
     command -v ldid &>/dev/null || missing+=("ldid (brew install ldid-procursus)")
     if ((${#missing[@]} > 0)); then
         die "Missing required tools: ${missing[*]}. Run: make setup_tools"
     fi
-    SSHPASS_BIN="$(command -v sshpass)"
-}
-
-wait_for_device_ssh_ready() {
-    local timeout interval elapsed
-    timeout="$CFW_SSH_READY_TIMEOUT"
-    interval="$CFW_SSH_READY_INTERVAL"
-    elapsed=0
-
-    [[ "$timeout" == <-> ]] || die "CFW_SSH_READY_TIMEOUT must be an integer (seconds)"
-    [[ "$interval" == <-> ]] || die "CFW_SSH_READY_INTERVAL must be an integer (seconds)"
-    (( timeout > 0 )) || die "CFW_SSH_READY_TIMEOUT must be > 0"
-    (( interval > 0 )) || die "CFW_SSH_READY_INTERVAL must be > 0"
-
-    echo "[*] Waiting for ramdisk SSH on ${SSH_USER}@${SSH_HOST}:${SSH_PORT} (timeout=${timeout}s)..."
-    while (( elapsed < timeout )); do
-        if "$SSHPASS_BIN" -p "$SSH_PASS" ssh \
-            -o StrictHostKeyChecking=no \
-            -o UserKnownHostsFile=/dev/null \
-            -o PreferredAuthentications=password \
-            -o ConnectTimeout=5 \
-            -q \
-            -p "$SSH_PORT" \
-            "$SSH_USER@$SSH_HOST" "echo ready" >/dev/null 2>&1
-        then
-            echo "[+] Ramdisk SSH is reachable"
-            return
-        fi
-        sleep "$interval"
-        (( elapsed += interval ))
-    done
-
-    die "Ramdisk SSH is not reachable on ${SSH_HOST}:${SSH_PORT}. Make sure ramdisk is running (make ramdisk_send) and iproxy is forwarding ${SSH_PORT}->22."
-}
-
-_sshpass() {
-    "$SSHPASS_BIN" -p "$SSH_PASS" "$@"
-}
-
-_ssh_retry() {
-    local attempt rc label
-    label=${2:-cmd}
-    for ((attempt = 1; attempt <= SSH_RETRY; attempt++)); do
-        "$@" && return 0
-        rc=$?
-        [[ $rc -ne 255 ]] && return $rc # real command failure — don't retry
-        echo "  [${label}] connection lost (attempt $attempt/$SSH_RETRY), retrying in 3s..." >&2
-        sleep 3
-    done
-    return 255
-}
-
-ssh_cmd() {
-    _ssh_retry _sshpass ssh "${SSH_OPTS[@]}" -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" "$@"
-}
-scp_to() {
-    _ssh_retry _sshpass scp -q "${SSH_OPTS[@]}" -P "$SSH_PORT" -r "$1" "$SSH_USER@$SSH_HOST:$2"
-}
-scp_from() {
-    _ssh_retry _sshpass scp -q "${SSH_OPTS[@]}" -P "$SSH_PORT" "$SSH_USER@$SSH_HOST:$1" "$2"
-}
-
-remote_file_exists() {
-    ssh_cmd "test -f '$1'" 2>/dev/null
 }
 
 ldid_sign() {
@@ -150,11 +75,38 @@ ldid_sign() {
     ldid "${args[@]}" "$file"
 }
 
+# Like ldid_sign but re-applies an entitlements plist (for binaries whose
+# entitlements must survive the re-sign, e.g. diskimagesiod's embedded sandbox
+# profile + private DA/apfs entitlements).
+ldid_sign_ent() {
+    local file="$1" ent="$2" bundle_id="${3:-}"
+    local args=("-S$ent" -M "-K$VM_DIR/$CFW_INPUT/signcert.p12")
+    [[ -n "$bundle_id" ]] && args+=("-I$bundle_id")
+    ldid "${args[@]}" "$file"
+}
+
+host_hdiutil() {
+    local rc
+    # SUDO_PASSWORD flow exports SUDO_ASKPASS: go straight to sudo -A so
+    # hdiutil never runs unprivileged first (which triggers an auth prompt).
+    [[ -n "${SUDO_ASKPASS:-}" ]] && { sudo -A hdiutil "$@"; return; }
+
+    hdiutil "$@" && return 0
+    rc=$?
+
+    if sudo -n true 2>/dev/null; then
+        sudo hdiutil "$@"
+        return
+    fi
+
+    return "$rc"
+}
+
 # Detach a DMG mountpoint if currently mounted, ignore errors
 safe_detach() {
     local mnt="$1"
     if mount | grep -Fq " on $mnt "; then
-        sudo hdiutil detach -force "$mnt" 2>/dev/null || true
+        host_hdiutil detach -force "$mnt" 2>/dev/null || true
     fi
 }
 
@@ -168,19 +120,6 @@ assert_mount_under_vm() {
         "$abs_vm/"*) ;;
         *) die "Unsafe ${label}: ${abs_mnt} (must be inside ${abs_vm})" ;;
     esac
-}
-
-# Mount device filesystem, tolerate already-mounted
-remote_mount() {
-    local dev="$1" mnt="$2" opts="${3:-rw}"
-    ssh_cmd "/bin/mkdir -p $mnt"
-    if ssh_cmd "/sbin/mount | /usr/bin/grep -q ' on $mnt '"; then
-        return 0
-    fi
-    ssh_cmd "/sbin/mount_apfs -o $opts $dev $mnt 2>/dev/null || true"
-    if ! ssh_cmd "/sbin/mount | /usr/bin/grep -q ' on $mnt '"; then
-        die "Failed to mount $dev at $mnt (opts=$opts). Make sure the ramdisk was booted with the expected patched kernel."
-    fi
 }
 
 # ── Find restore directory ─────────────────────────────────────
@@ -199,7 +138,7 @@ setup_cfw_input() {
         archive="$search_dir/$CFW_ARCHIVE"
         if [[ -f "$archive" ]]; then
             echo "  Extracting $CFW_ARCHIVE..."
-            tar --zstd -xf "$archive" -C "$VM_DIR"
+            "$TAR" --zstd --warning=no-unknown-keyword -xf "$archive" -C "$VM_DIR"
             return
         fi
     done
@@ -225,6 +164,25 @@ cleanup_on_exit() {
 }
 trap cleanup_on_exit EXIT
 
+# The VM's Disk.img is attached on the host by cfw_install_host.sh; its APFS
+# volumes are mounted here and every file is placed with plain cp/chmod/etc.
+# (the VM is off — nothing runs "on the device").
+: "${CFW_HOST_CONTAINER:?CFW_HOST_CONTAINER unset — run via cfw_install_host.sh}"
+HOST_MNT="${CFW_HOST_MNT:-/private/tmp/cfwhost}"
+MNT1="$HOST_MNT/mnt1"   # disk1s1 (System / rootfs)
+MNT3="$HOST_MNT/mnt3"   # disk1s3
+TAR="$(command -v gtar 2>/dev/null || echo /opt/homebrew/bin/gtar)"  # macOS bsdtar lacks GNU tar flags
+mkdir -p "$HOST_MNT"
+
+# Mount an APFS volume of the attached image container at a host mount point.
+mount_vol() {  # mount_vol <slice, e.g. s1> <mountpoint> [opts]
+    local dev="/dev/${CFW_HOST_CONTAINER}$1" mnt="$2" opts="${3:-rw}"
+    /bin/mkdir -p "$mnt"
+    /sbin/mount | /usr/bin/grep -q " on $mnt " && return 0
+    /sbin/mount_apfs -o "$opts" "$dev" "$mnt" 2>/dev/null || true
+    /sbin/mount | /usr/bin/grep -q " on $mnt " || die "mount failed: $dev -> $mnt"
+}
+
 # ════════════════════════════════════════════════════════════════
 # Main
 # ════════════════════════════════════════════════════════════════
@@ -239,7 +197,6 @@ setup_cfw_input
 INPUT_DIR="$VM_DIR/$CFW_INPUT"
 echo "[+] Input resources: $INPUT_DIR"
 check_prerequisites
-wait_for_device_ssh_ready
 
 mkdir -p "$TEMP_DIR"
 
@@ -256,45 +213,26 @@ echo "  AppOS:    $CRYPTEX_APPOS"
 echo ""
 echo "[1/7] Installing Cryptex (SystemOS + AppOS)..."
 
-# Mount device rootfs first to check existing state
-echo "  Mounting device rootfs rw..."
-remote_mount /dev/disk1s1 /mnt1
+# Mount the image's System volume first to check existing state
+echo "  Mounting rootfs rw..."
+mount_vol s1 "$MNT1"
 
-# Rename APFS update snapshot to orig-fs (idempotent)
-echo "  Checking APFS snapshots..."
-SNAP_LIST=$(ssh_cmd "snaputil -l /mnt1 2>/dev/null" || true)
-if echo "$SNAP_LIST" | grep -q "^orig-fs$"; then
-    echo "  Snapshot 'orig-fs' already exists, skipping rename"
-else
-    UPDATE_SNAP=$(echo "$SNAP_LIST" | awk '/^com\.apple\.os\.update-/{print; exit}')
-    if [[ -n "$UPDATE_SNAP" ]]; then
-        echo "  Renaming snapshot: $UPDATE_SNAP -> orig-fs"
-        ssh_cmd "snaputil -n '$UPDATE_SNAP' orig-fs /mnt1"
-        # Verify rename succeeded
-        if ! ssh_cmd "snaputil -l /mnt1 2>/dev/null" | grep -q "^orig-fs$"; then
-            die "Failed to rename snapshot to orig-fs"
-        fi
-        echo "  Snapshot renamed, remounting..."
-        ssh_cmd "/sbin/umount /mnt1"
-        remote_mount /dev/disk1s1 /mnt1
-        echo "  [+] Snapshot renamed to orig-fs"
-    else
-        echo "  No com.apple.os.update- snapshot found, skipping"
-    fi
-fi
-
-# Check if Cryptexes already exist on device (skip the slow copy if so)
-CRYPTEX_OS_COUNT=$(ssh_cmd "/bin/ls /mnt1/System/Cryptexes/OS/ 2>/dev/null | /usr/bin/wc -l" | tr -d ' ')
-CRYPTEX_APP_COUNT=$(ssh_cmd "/bin/ls /mnt1/System/Cryptexes/App/ 2>/dev/null | /usr/bin/wc -l" | tr -d ' ')
+# Check if Cryptexes already exist on the volume (skip the slow copy if so).
+# ls only runs when the dir exists, so its failure can't trip set -e/pipefail
+# (on a fresh install these dirs don't exist yet → counts stay 0).
+CRYPTEX_OS_COUNT=0
+CRYPTEX_APP_COUNT=0
+[[ -d "$MNT1/System/Cryptexes/OS" ]]  && CRYPTEX_OS_COUNT=$(/bin/ls "$MNT1/System/Cryptexes/OS/"  | /usr/bin/wc -l | tr -d ' ')
+[[ -d "$MNT1/System/Cryptexes/App" ]] && CRYPTEX_APP_COUNT=$(/bin/ls "$MNT1/System/Cryptexes/App/" | /usr/bin/wc -l | tr -d ' ')
 
 if [[ "${CRYPTEX_OS_COUNT:-0}" -gt 0 && "${CRYPTEX_APP_COUNT:-0}" -gt 0 ]]; then
-    echo "  [*] Cryptexes already installed on device (OS=${CRYPTEX_OS_COUNT} entries, App=${CRYPTEX_APP_COUNT} entries), skipping"
+    echo "  [*] Cryptexes already installed (OS=${CRYPTEX_OS_COUNT} entries, App=${CRYPTEX_APP_COUNT} entries), skipping"
 
     # Still ensure dyld symlinks exist
-    ssh_cmd "/bin/ln -sf ../../../System/Cryptexes/OS/System/Library/Caches/com.apple.dyld \
-        /mnt1/System/Library/Caches/com.apple.dyld"
-    ssh_cmd "/bin/ln -sf ../../../../System/Cryptexes/OS/System/DriverKit/System/Library/dyld \
-        /mnt1/System/DriverKit/System/Library/dyld"
+    /bin/ln -sf ../../../System/Cryptexes/OS/System/Library/Caches/com.apple.dyld \
+        $MNT1/System/Library/Caches/com.apple.dyld
+    /bin/ln -sf ../../../../System/Cryptexes/OS/System/DriverKit/System/Library/dyld \
+        $MNT1/System/DriverKit/System/Library/dyld
 
     echo "  [+] Cryptex skipped (already present)"
 else
@@ -329,25 +267,27 @@ else
     assert_mount_under_vm "$MNT_APPOS" "AppOS mountpoint"
 
     echo "  Mounting SystemOS..."
-    sudo hdiutil attach -mountpoint "$MNT_SYSOS" "$SYSOS_DMG" -nobrowse -owners off
+    host_hdiutil attach -mountpoint "$MNT_SYSOS" "$SYSOS_DMG" -nobrowse -owners off \
+        || die "Failed to mount SystemOS DMG. Run 'sudo -v' in a terminal and retry if hdiutil needs administrator privileges."
     echo "  Mounting AppOS..."
-    sudo hdiutil attach -mountpoint "$MNT_APPOS" "$APPOS_DMG" -nobrowse -owners off
+    host_hdiutil attach -mountpoint "$MNT_APPOS" "$APPOS_DMG" -nobrowse -owners off \
+        || die "Failed to mount AppOS DMG. Run 'sudo -v' in a terminal and retry if hdiutil needs administrator privileges."
 
-    ssh_cmd "/bin/rm -rf /mnt1/System/Cryptexes/App /mnt1/System/Cryptexes/OS"
-    ssh_cmd "/bin/mkdir -p /mnt1/System/Cryptexes/App /mnt1/System/Cryptexes/OS"
-    ssh_cmd "/bin/chmod 0755 /mnt1/System/Cryptexes/App /mnt1/System/Cryptexes/OS"
+    /bin/rm -rf $MNT1/System/Cryptexes/App $MNT1/System/Cryptexes/OS
+    /bin/mkdir -p $MNT1/System/Cryptexes/App $MNT1/System/Cryptexes/OS
+    /bin/chmod 0755 $MNT1/System/Cryptexes/App $MNT1/System/Cryptexes/OS
 
-    # Copy Cryptex files to device
-    echo "  Copying Cryptexes to device (this takes ~3 minutes)..."
-    scp_to "$MNT_SYSOS/." "/mnt1/System/Cryptexes/OS"
-    scp_to "$MNT_APPOS/." "/mnt1/System/Cryptexes/App"
+    # Copy Cryptex files onto the volume
+    echo "  Copying Cryptexes..."
+    cp -R "$MNT_SYSOS/." "$MNT1/System/Cryptexes/OS"
+    cp -R "$MNT_APPOS/." "$MNT1/System/Cryptexes/App"
 
     # Create dyld symlinks (ln -sf is idempotent)
     echo "  Creating dyld symlinks..."
-    ssh_cmd "/bin/ln -sf ../../../System/Cryptexes/OS/System/Library/Caches/com.apple.dyld \
-        /mnt1/System/Library/Caches/com.apple.dyld"
-    ssh_cmd "/bin/ln -sf ../../../../System/Cryptexes/OS/System/DriverKit/System/Library/dyld \
-        /mnt1/System/DriverKit/System/Library/dyld"
+    /bin/ln -sf ../../../System/Cryptexes/OS/System/Library/Caches/com.apple.dyld \
+        $MNT1/System/Library/Caches/com.apple.dyld
+    /bin/ln -sf ../../../../System/Cryptexes/OS/System/DriverKit/System/Library/dyld \
+        $MNT1/System/DriverKit/System/Library/dyld
 
     # Unmount Cryptex DMGs
     echo "  Unmounting Cryptex DMGs..."
@@ -357,26 +297,137 @@ else
     echo "  [+] Cryptex installed"
 fi
 
+# Some userland versions send an IOMobileFramebuffer SwapEnd state whose size
+# differs from what the PCC vphone600 userclient expects (an exact
+# checkStructureInputSize check), so SwapEnd returns kIOReturnBadArgument and
+# the host VZ display stays black (guest still renders; visible over VNC).
+#
+# The accepted size is a property of the BASE KERNEL, not the userland:
+#   - 26.1 base: userclient expects 0x560
+#   - 26.4 base (xnu-12377, current): userclient expects 0x588
+# Reliably reading it from the kernelcache needs the IOMFB userclient dispatch
+# table (a blind shape-scan is ambiguous — 8 candidates), so until that dynamic
+# detection lands we key the target off the userland version as a proxy for the
+# validated base pairing:
+#   - 27.x runs on the 26.4 base           -> 0x588
+#   - 26.0/26.0.1 and 18.x validated on 26.1 base -> 0x560
+# Known userland-sent sizes: 18.x -> 0x514, 26.0/26.0.1 -> 0x548, 27.0 -> 0x6e0.
+# Patch only that immediate in the installed DSC; the patcher is semantic +
+# idempotent (rewrites the SwapEnd size to the target, no-op if already there).
+# NOTE: iOS 27 is NOT handled by the size-truncation path — its swap struct
+# (0x6e0) has a new layout, and more fundamentally 27 defaults the paravirt
+# display's present to IOMFB's `_virt_*` callback path, which never enters the
+# userclient at all (method 5 is never called), so no size change would help.
+# iOS 27 instead gets `patch-iomfb-force-kern` below, which retargets IOMFB's
+# public Swap* trampolines to their `_kern_*` (method-5) siblings — the path the
+# 26.4 paravirt GPU scans out to the host — paired with the KernelJBPatchIomfbSwap
+# kernel patches that make the userclient accept 27's native 0x6e0 struct.
+IOS_VERSION=$(/usr/bin/plutil -extract ProductVersion raw -o - "$MNT1/System/Library/CoreServices/SystemVersion.plist" 2>/dev/null || true)
+DSC_DIR="$MNT1/System/Cryptexes/OS/System/Library/Caches/com.apple.dyld"
+IOMFB_TARGET=""
+case "$IOS_VERSION" in
+    26.0*|18.*) IOMFB_TARGET=0x560 ;;
+esac
+if [[ -n "$IOMFB_TARGET" ]]; then
+    echo "  [*] Patching IOMobileFramebuffer SwapEnd payload size (iOS $IOS_VERSION -> $IOMFB_TARGET)..."
+    [[ -d "$DSC_DIR" ]] || die "dyld cache dir missing: $DSC_DIR"
+    "$PYTHON3" "$SCRIPT_DIR/patchers/cfw.py" patch-iomfb-swapend "$DSC_DIR" --target-size "$IOMFB_TARGET"
+fi
+case "$IOS_VERSION" in
+    27.*)
+        echo "  [*] Forcing IOMobileFramebuffer present onto the kern (method-5) path (iOS $IOS_VERSION)..."
+        [[ -d "$DSC_DIR" ]] || die "dyld cache dir missing: $DSC_DIR"
+        "$PYTHON3" "$SCRIPT_DIR/patchers/cfw.py" patch-iomfb-force-kern "$DSC_DIR"
+        ;;
+esac
+
+# iOS-27-only DSC patches (hard-gated — a 26.x/18.x base applies neither).
+#  - maxSlide: iOS 27's dyld shared cache nearly fills the vphone600 26.x kernel's
+#    fixed 6 GiB shared region. The kernel reserves the cache's mapped span PLUS the
+#    cache-header maxSlide (512 MiB); iOS 27.0 (~5.95 GiB span + 512 MiB) overflows
+#    0x180000000, so _shared_region_map_and_slide returns ENOMEM, dyld cannot map
+#    libSystem, and launchd (pid 1) panics at boot. Zero maxSlide so the cache maps
+#    at slide 0. (The patcher also self-gates on the actual span, but older userlands
+#    fit with full slide and never need it — so it is not run there at all.)
+#  - lsd embedded-registration gate: opens lsd's containerized-registration path so
+#    the iOS-27 vpregister first-boot tool can register JB apps (uicache's
+#    registerApplicationDictionary is a no-op stub on 27). Not needed on 26.x/18.x,
+#    where uicache registers apps normally.
+#  - xpc LWCR self-check: iOS 27's libxpc brk-aborts when its Lightweight Code
+#    Requirement matcher returns the contradictory (matched=0, error_code=MATCH) pair
+#    that our JB code-signing environment produces. That crash-loops every daemon which
+#    pins an entitlement peer-requirement (intelligencetasksd/searchpartyd/transparencyd/
+#    bluetoothd/...). Absent on 26.x/18.x libxpc (self-gating patcher no-ops there).
+# FORCE_DSC_MAXSLIDE=1 (default 0): opt in to zeroing maxSlide on non-27 bases,
+# whose caches fit and would otherwise self-gate to a no-op (--force bypasses that).
+DSC_DIR="$MNT1/System/Cryptexes/OS/System/Library/Caches/com.apple.dyld"
+FORCE_DSC_MAXSLIDE="${FORCE_DSC_MAXSLIDE:-0}"
+case "$IOS_VERSION" in
+    27.*)
+        if [[ -d "$DSC_DIR" ]]; then
+            echo "  [*] Checking dyld cache maxSlide vs kernel shared region..."
+            "$PYTHON3" "$SCRIPT_DIR/patchers/cfw.py" patch-dsc-maxslide "$DSC_DIR"
+            echo "  [*] Patching lsd embedded-registration gate (iOS 27 app registration)..."
+            "$PYTHON3" "$SCRIPT_DIR/patchers/cfw.py" patch-lsd-embedded-reg "$DSC_DIR"
+            echo "  [*] Patching libxpc LWCR self-check (iOS 27 daemon crash-loop)..."
+            "$PYTHON3" "$SCRIPT_DIR/patchers/cfw.py" patch-xpc-lwcr "$DSC_DIR"
+            echo "  [*] Patching os_lockdown_mode_enabled (missing MAC sysctl -> launchd abort)..."
+            "$PYTHON3" "$SCRIPT_DIR/patchers/cfw.py" patch-lockdown-mode "$DSC_DIR"
+        fi
+        ;;
+    *)
+        if [[ "$FORCE_DSC_MAXSLIDE" == "1" && -d "$DSC_DIR" ]]; then
+            echo "  [*] Forcing dyld cache maxSlide=0 (opt-in FORCE_DSC_MAXSLIDE=1; base iOS ${IOS_VERSION:-unknown})..."
+            "$PYTHON3" "$SCRIPT_DIR/patchers/cfw.py" patch-dsc-maxslide "$DSC_DIR" --force
+        fi
+        ;;
+esac
+
 # ═══════════ 2/7 PATCH SEPUTIL ════════════════════════════════
 echo ""
 echo "[2/7] Patching seputil..."
 
 # Always patch from .bak (original unpatched binary)
-if ! remote_file_exists "/mnt1/usr/libexec/seputil.bak"; then
+if ! [[ -e "$MNT1/usr/libexec/seputil.bak" ]]; then
     echo "  Creating backup..."
-    ssh_cmd "/bin/cp /mnt1/usr/libexec/seputil /mnt1/usr/libexec/seputil.bak"
+    /bin/cp $MNT1/usr/libexec/seputil $MNT1/usr/libexec/seputil.bak
 fi
 
-scp_from "/mnt1/usr/libexec/seputil.bak" "$TEMP_DIR/seputil"
+cp "$MNT1/usr/libexec/seputil.bak" "$TEMP_DIR/seputil"
 "$PYTHON3" "$SCRIPT_DIR/patchers/cfw.py" patch-seputil "$TEMP_DIR/seputil"
 ldid_sign "$TEMP_DIR/seputil" "com.apple.seputil"
-scp_to "$TEMP_DIR/seputil" "/mnt1/usr/libexec/seputil"
-ssh_cmd "/bin/chmod 0755 /mnt1/usr/libexec/seputil"
+cp -R "$TEMP_DIR/seputil" "$MNT1/usr/libexec/seputil"
+/bin/chmod 0755 $MNT1/usr/libexec/seputil
+
+# ── DDI (/System/Developer) auto-mount — diskimagesiod (iOS 27 only) ──
+# Force -[DIDiskArb isMountCompleteWithExpectedCount:diskTracker:] → YES so
+# MobileStorageMounter proceeds to mount the iOS-27 personalized DDI (its
+# waitForDAMount otherwise hangs forever on the 26.4 vphone600 hybrid: only some
+# IOMedia appear to diskimagesiod's DA session + DA never auto-mounts). Pairs
+# with the DiskImages2 ABI + sandbox mac_policy_ops[124] JB kernel patches.
+# Entitlements (embedded sandbox profile + private DA/apfs) preserved on re-sign.
+# Gated to 27.*: on a version-matched userland the native waitForDAMount completes
+# correctly, and forcing the wait to return early could race the real mount — so
+# it is NOT applied there (uses the same $IOS_VERSION as the DSC patches above).
+case "$IOS_VERSION" in
+    27.*)
+        echo "  Patching diskimagesiod (DDI auto-mount, iOS $IOS_VERSION)..."
+        if ! [[ -e "$MNT1/usr/libexec/diskimagesiod.bak" ]]; then
+            /bin/cp "$MNT1/usr/libexec/diskimagesiod" "$MNT1/usr/libexec/diskimagesiod.bak"
+        fi
+        ldid -e "$MNT1/usr/libexec/diskimagesiod.bak" > "$TEMP_DIR/diskimagesiod.ent.plist"
+        cp "$MNT1/usr/libexec/diskimagesiod.bak" "$TEMP_DIR/diskimagesiod"
+        "$PYTHON3" "$SCRIPT_DIR/patchers/cfw.py" patch-diskimagesiod "$TEMP_DIR/diskimagesiod"
+        ldid_sign_ent "$TEMP_DIR/diskimagesiod" "$TEMP_DIR/diskimagesiod.ent.plist" "com.apple.diskimagesiod"
+        cp -R "$TEMP_DIR/diskimagesiod" "$MNT1/usr/libexec/diskimagesiod"
+        /bin/chmod 0755 "$MNT1/usr/libexec/diskimagesiod"
+        ;;
+esac
 
 # Rename gigalocker (mv to same name is fine on re-run)
 echo "  Renaming gigalocker..."
-remote_mount /dev/disk1s3 /mnt3
-ssh_cmd '/bin/mv /mnt3/*.gl /mnt3/AA.gl 2>/dev/null || true'
+mount_vol s3 "$MNT3"
+mv "$MNT3"/*.gl(N) "$MNT3/AA.gl" 2>/dev/null || true
 
 echo "  [+] seputil patched"
 
@@ -384,21 +435,21 @@ echo "  [+] seputil patched"
 echo ""
 echo "[3/7] Installing AppleParavirtGPUMetalIOGPUFamily..."
 
-scp_to "$INPUT_DIR/custom/AppleParavirtGPUMetalIOGPUFamily.tar" "/mnt1"
-ssh_cmd "/usr/bin/tar --preserve-permissions --no-overwrite-dir \
-    -xf /mnt1/AppleParavirtGPUMetalIOGPUFamily.tar -C /mnt1"
+cp -R "$INPUT_DIR/custom/AppleParavirtGPUMetalIOGPUFamily.tar" "$MNT1"
+"$TAR" --preserve-permissions --no-overwrite-dir --warning=no-unknown-keyword \
+    -xf $MNT1/AppleParavirtGPUMetalIOGPUFamily.tar -C $MNT1
 
-BUNDLE="/mnt1/System/Library/Extensions/AppleParavirtGPUMetalIOGPUFamily.bundle"
+BUNDLE="$MNT1/System/Library/Extensions/AppleParavirtGPUMetalIOGPUFamily.bundle"
 # Clean macOS resource fork files (._* files from tar xattrs)
-ssh_cmd "find $BUNDLE -name '._*' -delete 2>/dev/null || true"
-ssh_cmd "/usr/sbin/chown -R 0:0 $BUNDLE"
-ssh_cmd "/bin/chmod 0755 $BUNDLE"
-ssh_cmd "/bin/chmod 0755 $BUNDLE/libAppleParavirtCompilerPluginIOGPUFamily.dylib"
-ssh_cmd "/bin/chmod 0755 $BUNDLE/AppleParavirtGPUMetalIOGPUFamily"
-ssh_cmd "/bin/chmod 0755 $BUNDLE/_CodeSignature"
-ssh_cmd "/bin/chmod 0644 $BUNDLE/_CodeSignature/CodeResources"
-ssh_cmd "/bin/chmod 0644 $BUNDLE/Info.plist"
-ssh_cmd "/bin/rm -f /mnt1/AppleParavirtGPUMetalIOGPUFamily.tar"
+find $BUNDLE -name '._*' -delete 2>/dev/null || true
+/usr/sbin/chown -R 0:0 $BUNDLE
+/bin/chmod 0755 $BUNDLE
+/bin/chmod 0755 $BUNDLE/libAppleParavirtCompilerPluginIOGPUFamily.dylib
+/bin/chmod 0755 $BUNDLE/AppleParavirtGPUMetalIOGPUFamily
+/bin/chmod 0755 $BUNDLE/_CodeSignature
+/bin/chmod 0644 $BUNDLE/_CodeSignature/CodeResources
+/bin/chmod 0644 $BUNDLE/Info.plist
+/bin/rm -f $MNT1/AppleParavirtGPUMetalIOGPUFamily.tar
 
 echo "  [+] GPU driver installed"
 
@@ -406,10 +457,14 @@ echo "  [+] GPU driver installed"
 echo ""
 echo "[4/7] Installing iosbinpack64..."
 
-scp_to "$INPUT_DIR/jb/iosbinpack64.tar" "/mnt1"
-ssh_cmd "/usr/bin/tar --preserve-permissions --no-overwrite-dir \
-    -xf /mnt1/iosbinpack64.tar -C /mnt1"
-ssh_cmd "/bin/rm -f /mnt1/iosbinpack64.tar"
+cp -R "$INPUT_DIR/jb/iosbinpack64.tar" "$MNT1"
+"$TAR" --preserve-permissions --no-overwrite-dir --warning=no-unknown-keyword \
+    -xf $MNT1/iosbinpack64.tar -C $MNT1
+/bin/rm -f $MNT1/iosbinpack64.tar
+
+# dropbear host keys are generated on first boot by dropbear -R; just ensure
+# the key directory exists for it to write into.
+/bin/mkdir -p $MNT3/dropbear
 
 echo "  [+] iosbinpack64 installed"
 
@@ -418,16 +473,16 @@ echo ""
 echo "[5/7] Patching launchd_cache_loader..."
 
 # Always patch from .bak (original unpatched binary)
-if ! remote_file_exists "/mnt1/usr/libexec/launchd_cache_loader.bak"; then
+if ! [[ -e "$MNT1/usr/libexec/launchd_cache_loader.bak" ]]; then
     echo "  Creating backup..."
-    ssh_cmd "/bin/cp /mnt1/usr/libexec/launchd_cache_loader /mnt1/usr/libexec/launchd_cache_loader.bak"
+    /bin/cp $MNT1/usr/libexec/launchd_cache_loader $MNT1/usr/libexec/launchd_cache_loader.bak
 fi
 
-scp_from "/mnt1/usr/libexec/launchd_cache_loader.bak" "$TEMP_DIR/launchd_cache_loader"
+cp "$MNT1/usr/libexec/launchd_cache_loader.bak" "$TEMP_DIR/launchd_cache_loader"
 "$PYTHON3" "$SCRIPT_DIR/patchers/cfw.py" patch-launchd-cache-loader "$TEMP_DIR/launchd_cache_loader"
 ldid_sign "$TEMP_DIR/launchd_cache_loader" "com.apple.launchd_cache_loader"
-scp_to "$TEMP_DIR/launchd_cache_loader" "/mnt1/usr/libexec/launchd_cache_loader"
-ssh_cmd "/bin/chmod 0755 /mnt1/usr/libexec/launchd_cache_loader"
+cp -R "$TEMP_DIR/launchd_cache_loader" "$MNT1/usr/libexec/launchd_cache_loader"
+/bin/chmod 0755 $MNT1/usr/libexec/launchd_cache_loader
 
 echo "  [+] launchd_cache_loader patched"
 
@@ -436,16 +491,16 @@ echo ""
 echo "[6/7] Patching mobileactivationd..."
 
 # Always patch from .bak (original unpatched binary)
-if ! remote_file_exists "/mnt1/usr/libexec/mobileactivationd.bak"; then
+if ! [[ -e "$MNT1/usr/libexec/mobileactivationd.bak" ]]; then
     echo "  Creating backup..."
-    ssh_cmd "/bin/cp /mnt1/usr/libexec/mobileactivationd /mnt1/usr/libexec/mobileactivationd.bak"
+    /bin/cp $MNT1/usr/libexec/mobileactivationd $MNT1/usr/libexec/mobileactivationd.bak
 fi
 
-scp_from "/mnt1/usr/libexec/mobileactivationd.bak" "$TEMP_DIR/mobileactivationd"
+cp "$MNT1/usr/libexec/mobileactivationd.bak" "$TEMP_DIR/mobileactivationd"
 "$PYTHON3" "$SCRIPT_DIR/patchers/cfw.py" patch-mobileactivationd "$TEMP_DIR/mobileactivationd"
 ldid_sign "$TEMP_DIR/mobileactivationd"
-scp_to "$TEMP_DIR/mobileactivationd" "/mnt1/usr/libexec/mobileactivationd"
-ssh_cmd "/bin/chmod 0755 /mnt1/usr/libexec/mobileactivationd"
+cp -R "$TEMP_DIR/mobileactivationd" "$MNT1/usr/libexec/mobileactivationd"
+/bin/chmod 0755 $MNT1/usr/libexec/mobileactivationd
 
 echo "  [+] mobileactivationd patched"
 
@@ -485,57 +540,51 @@ ldid \
     -S"$VPHONED_SRC/entitlements.plist" \
     -M "-K$VM_DIR/$CFW_INPUT/signcert.p12" \
     "$TEMP_DIR/vphoned"
-scp_to "$TEMP_DIR/vphoned" "/mnt1/usr/bin/vphoned"
-ssh_cmd "/bin/chmod 0755 /mnt1/usr/bin/vphoned"
+cp -R "$TEMP_DIR/vphoned" "$MNT1/usr/bin/vphoned"
+/bin/chmod 0755 $MNT1/usr/bin/vphoned
 # Keep a copy of the signed binary for host-side auto-update
 cp "$TEMP_DIR/vphoned" "$VM_DIR/.vphoned.signed"
 echo "  [+] vphoned installed (signed copy at .vphoned.signed)"
 
 # Send daemon plists (overwrite on re-run)
 for plist in bash.plist dropbear.plist trollvnc.plist rpcserver_ios.plist; do
-    scp_to "$INPUT_DIR/jb/LaunchDaemons/$plist" "/mnt1/System/Library/LaunchDaemons/"
-    ssh_cmd "/bin/chmod 0644 /mnt1/System/Library/LaunchDaemons/$plist"
+    plist_src="$INPUT_DIR/jb/LaunchDaemons/$plist"
+    if [[ "$plist" == "dropbear.plist" ]]; then
+        plist_src="$TEMP_DIR/dropbear.plist"
+        cp "$INPUT_DIR/jb/LaunchDaemons/dropbear.plist" "$plist_src"
+        "$PYTHON3" "$SCRIPT_DIR/patchers/cfw.py" patch-dropbear-plist "$plist_src"
+    fi
+    cp -R "$plist_src" "$MNT1/System/Library/LaunchDaemons/"
+    /bin/chmod 0644 $MNT1/System/Library/LaunchDaemons/$plist
 done
-scp_to "$VPHONED_SRC/vphoned.plist" "/mnt1/System/Library/LaunchDaemons/"
-ssh_cmd "/bin/chmod 0644 /mnt1/System/Library/LaunchDaemons/vphoned.plist"
+cp -R "$VPHONED_SRC/vphoned.plist" "$MNT1/System/Library/LaunchDaemons/"
+/bin/chmod 0644 $MNT1/System/Library/LaunchDaemons/vphoned.plist
 
 # Always patch launchd.plist from .bak (original)
 echo "  Patching launchd.plist..."
-if ! remote_file_exists "/mnt1/System/Library/xpc/launchd.plist.bak"; then
+if ! [[ -e "$MNT1/System/Library/xpc/launchd.plist.bak" ]]; then
     echo "  Creating backup..."
-    ssh_cmd "/bin/cp /mnt1/System/Library/xpc/launchd.plist /mnt1/System/Library/xpc/launchd.plist.bak"
+    /bin/cp $MNT1/System/Library/xpc/launchd.plist $MNT1/System/Library/xpc/launchd.plist.bak
 fi
 
-scp_from "/mnt1/System/Library/xpc/launchd.plist.bak" "$TEMP_DIR/launchd.plist"
+cp "$MNT1/System/Library/xpc/launchd.plist.bak" "$TEMP_DIR/launchd.plist"
 cp "$VPHONED_SRC/vphoned.plist" "$INPUT_DIR/jb/LaunchDaemons/"
 "$PYTHON3" "$SCRIPT_DIR/patchers/cfw.py" inject-daemons "$TEMP_DIR/launchd.plist" "$INPUT_DIR/jb/LaunchDaemons"
-scp_to "$TEMP_DIR/launchd.plist" "/mnt1/System/Library/xpc/launchd.plist"
-ssh_cmd "/bin/chmod 0644 /mnt1/System/Library/xpc/launchd.plist"
+cp -R "$TEMP_DIR/launchd.plist" "$MNT1/System/Library/xpc/launchd.plist"
+/bin/chmod 0644 $MNT1/System/Library/xpc/launchd.plist
 
 echo "  [+] LaunchDaemons installed"
 
 # ═══════════ CLEANUP ═════════════════════════════════════════
 echo ""
-echo "[*] Unmounting device filesystems..."
-ssh_cmd "/sbin/umount /mnt1 2>/dev/null || true"
-ssh_cmd "/sbin/umount /mnt3 2>/dev/null || true"
+echo "[*] Unmounting image volumes..."
+/sbin/umount $MNT1 2>/dev/null || true
+/sbin/umount $MNT3 2>/dev/null || true
 
-# Keep .cfw_temp/Cryptex*.dmg cached (slow to re-create)
-# Only remove temp binaries
-echo "[*] Cleaning up temp binaries..."
-rm -f "$TEMP_DIR/seputil" \
-    "$TEMP_DIR/launchd_cache_loader" \
-    "$TEMP_DIR/mobileactivationd" \
-    "$TEMP_DIR/vphoned" \
-    "$TEMP_DIR/launchd.plist"
+echo "[*] Cleaning up temp..."
+rm -rf "$TEMP_DIR"
 
 echo ""
 echo "[+] CFW installation complete!"
-echo "    Reboot the device for changes to take effect."
+echo "    Boot to apply changes."
 echo "    After boot, SSH will be available on port 22222 (password: alpine)"
-
-if [[ "$CFW_SKIP_HALT" == "1" ]]; then
-    echo "[*] CFW_SKIP_HALT=1, skipping halt."
-else
-    ssh_cmd "/sbin/halt" || true
-fi
