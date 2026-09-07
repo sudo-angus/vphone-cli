@@ -125,12 +125,21 @@ final class VPhoneCreateEngine {
     /// Reuse the clone's `ipsws/` download cache for the per-user layout
     /// (`~/.vphone/ipsws`) by linking one to the other, so moving the wizard
     /// onto `vm create` doesn't re-download firmware the make flow already
-    /// fetched. Only ever creates the link; an existing user cache is left alone.
+    /// fetched. Only ever creates (or clears a dangling) link; a real user cache is
+    /// left alone.
     nonisolated private static func shareIPSWCache(repoRoot: URL) -> String? {
         let fm = FileManager.default
         let userCache = VPhoneResources.userDataRoot().appendingPathComponent("ipsws")
         let repoCache = repoRoot.appendingPathComponent("ipsws")
         var isDir: ObjCBool = false
+        // A link left behind after the clone's ipsws/ was deleted "exists"
+        // for fw_prepare's mkdir -p yet leads nowhere, so create would fail
+        // before downloading anything. Drop it; below either re-links to a
+        // cache that is back, or leaves the path free for a real directory.
+        if (try? fm.attributesOfItem(atPath: userCache.path))?[.type] as? FileAttributeType == .typeSymbolicLink,
+           (try? userCache.checkResourceIsReachable()) != true {
+            try? fm.removeItem(at: userCache)
+        }
         guard !fm.fileExists(atPath: userCache.path),
               (try? userCache.checkResourceIsReachable()) != true,
               fm.fileExists(atPath: repoCache.path, isDirectory: &isDir), isDir.boolValue
