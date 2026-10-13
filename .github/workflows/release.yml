@@ -1,14 +1,19 @@
 name: release
 
-# Build the portable, signed vphone-cli.app and attach it to a published
-# GitHub Release. Uses ./scripts/build.sh (the canonical build) so the .app
-# ships self-contained — bundled scripts/patchers/resources/requirements.txt/
-# vphoned/.tools — not the lean `make bundle` output. Signing is ad-hoc
-# (codesign --sign -) with sources/vphone.entitlements; no secrets required.
+# Build the self-contained VPhone.bundle and vphone-launchpad.app and attach
+# both to a published GitHub Release. The Xcode scheme signs and validates the
+# bundle. Launchpad ships unsigned: nothing is signed at build time, and
+# Build/SignLaunchpad.sh is a separate step with a Developer ID identity.
 
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to build and upload
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -19,70 +24,115 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
 
-      - name: Init submodules
-        # vendor/* (--recursive: libcapstone-spm builds capstone from its own
-        # nested submodule) for the Swift build; scripts/resources is the CFW
-        # asset storage that build.sh bundles into the .app; scripts/repos/*
-        # provide the trustcache/insert_dylib tool sources.
-        run: |
-          git submodule update --init --recursive --depth 1 \
-            vendor/swift-argument-parser \
-            vendor/Dynamic \
-            vendor/libcapstone-spm \
-            vendor/libimg4-spm \
-            vendor/MachOKit \
-            scripts/resources \
-            scripts/repos/trustcache \
-            scripts/repos/insert_dylib
+      - name: Install xcbeautify
+        run: command -v xcbeautify >/dev/null || brew install xcbeautify
 
       - name: Toolchain versions
         run: |
           swift --version
           xcodebuild -version
+          xcbeautify --version
 
-      - name: Install build deps
-        run: brew install ldid-procursus openssl@3
-
-      - name: Build .tools/bin/{trustcache,insert_dylib}
-        # build.sh bundles these runtime tools into the .app and errors if
-        # absent. Mirrors scripts/setup_tools.sh steps [2/4] and [3/4]; its
-        # venv ([4/4]) and sshpass ([1/4]) steps aren't needed to build.
-        run: |
-          set -euo pipefail
-          mkdir -p .tools/bin
-          openssl_prefix="$(brew --prefix openssl@3)"
-          make -C scripts/repos/trustcache \
-            OPENSSL=1 \
-            CFLAGS="-I${openssl_prefix}/include -DOPENSSL -w" \
-            LDFLAGS="-L${openssl_prefix}/lib" \
-            -j"$(sysctl -n hw.logicalcpu)"
-          cp scripts/repos/trustcache/trustcache .tools/bin/trustcache
-          clang -o .tools/bin/insert_dylib \
-            scripts/repos/insert_dylib/insert_dylib/main.c -framework Security -O2
-
-      - name: Build and bundle (portable .app)
-        run: ./scripts/build.sh
-
-      - name: Verify the bundle is portable-complete and entitled
-        run: |
-          set -euo pipefail
-          res=.build/vphone-cli.app/Contents/Resources
-          for p in scripts/fw_prepare.sh scripts/patchers/cfw.py scripts/resources \
-                   requirements.txt vphoned.signed .tools/bin/trustcache .tools/bin/insert_dylib; do
-            [ -e "$res/$p" ] || { echo "::error::bundle is missing $p — not portable"; exit 1; }
-          done
-          bin=.build/vphone-cli.app/Contents/MacOS/vphone-cli
-          codesign -d --entitlements - "$bin" 2>&1 | grep -q 'com.apple.private.virtualization' \
-            || { echo "::error::required virtualization entitlement missing from signed app"; exit 1; }
-
-      - name: Package app
+      - name: Build VPhone.bundle
         env:
-          TAG: ${{ github.event.release.tag_name }}
-        run: ditto -c -k --keepParent .build/vphone-cli.app "vphone-cli-${TAG}.zip"
+          SWIFT_JOBS: "4"
+        run: |
+          set -o pipefail
+          mkdir -p .build
+          xcodebuild -workspace VPhone.xcworkspace -scheme VPhone \
+            -configuration Release -destination 'platform=macOS,arch=arm64' \
+            -derivedDataPath .build/XcodeBundle -jobs 4 build 2>&1 \
+            | tee .build/xcodebuild.log \
+            | xcbeautify --quiet --disable-logging --renderer github-actions
+
+      # Quiet mode hides unannotated build-phase output, including the reason
+      # a script phase failed. Keep the full log for that case.
+      - name: Show raw build log
+        if: failure()
+        run: tail -n 300 .build/xcodebuild.log
+
+      - name: Upload raw build log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcodebuild-log
+          path: .build/xcodebuild.log
+
+      - name: Verify bundle
+        run: |
+          set -euo pipefail
+          zsh VPhoneExecutable/VPhoneVirtualization/Build/ValidateBundle.sh \
+            .build/XcodeBundle/Build/Products/Release/VPhone.bundle
+
+      - name: Package bundle
+        env:
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          ditto -c -k --keepParent \
+            .build/XcodeBundle/Build/Products/Release/VPhone.bundle \
+            "VPhone-${TAG}.zip"
 
       - name: Upload to release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.event.release.tag_name }}
-        run: gh release upload "$TAG" "vphone-cli-${TAG}.zip" --clobber
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: gh release upload "$TAG" "VPhone-${TAG}.zip" --clobber
+
+  launchpad:
+    runs-on: macos-26
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+
+      - name: Install xcbeautify
+        run: command -v xcbeautify >/dev/null || brew install xcbeautify
+
+      - name: Toolchain versions
+        run: |
+          xcodebuild -version
+          xcbeautify --version
+
+      - name: Build vphone-launchpad.app
+        run: |
+          set -o pipefail
+          mkdir -p .build
+          xcodebuild -project VPhoneLaunchpad/VPhoneLaunchpad.xcodeproj \
+            -scheme VPhoneLaunchpad -configuration Release \
+            -destination 'platform=macOS,arch=arm64' \
+            -derivedDataPath .build/XcodeLaunchpad build 2>&1 \
+            | tee .build/xcodebuild.log \
+            | xcbeautify --quiet --disable-logging --renderer github-actions
+
+      # Quiet mode hides unannotated build-phase output, including the reason
+      # a script phase failed. Keep the full log for that case.
+      - name: Show raw build log
+        if: failure()
+        run: tail -n 300 .build/xcodebuild.log
+
+      - name: Upload raw build log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcodebuild-log-launchpad
+          path: .build/xcodebuild.log
+
+      # The asset name must not match Launchpad's own `^VPhone-.+\.zip$`
+      # bundle asset pattern.
+      - name: Package app
+        env:
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          ditto -c -k --keepParent \
+            .build/XcodeLaunchpad/Build/Products/Release/vphone-launchpad.app \
+            "vphone-launchpad-${TAG}.zip"
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: gh release upload "$TAG" "vphone-launchpad-${TAG}.zip" --clobber
