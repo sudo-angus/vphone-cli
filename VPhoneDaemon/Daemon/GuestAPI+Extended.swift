@@ -5,6 +5,7 @@ import Foundation
 extension GuestAPI {
     static func executeExtended(method: String, params: [String: Any]) throws -> [String: Any]? {
         let areas: [(String, [String: Any]) throws -> [String: Any]?] = [
+            executeSocks5,
             executeDevice,
             executeInput,
             executeInterface,

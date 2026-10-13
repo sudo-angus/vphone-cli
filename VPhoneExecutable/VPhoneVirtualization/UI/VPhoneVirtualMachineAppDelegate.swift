@@ -266,6 +266,7 @@ class VPhoneVirtualMachineAppDelegate: NSObject, NSApplicationDelegate {
                 mc?.updateAppsAvailability(available: caps.contains("apps"))
                 mc?.updateURLAvailability(available: caps.contains("url"))
                 mc?.updateClipboardAvailability(available: caps.contains("clipboard"))
+                mc?.shakeMenuItem?.isEnabled = caps.contains("motion_shake")
                 mc?.updateSettingsAvailability(available: true)
                 mc?.updateRestartAvailability(available: caps.contains("system_control"))
                 mc?.updateShutDownAvailability(available: caps.contains("system_shutdown"))
@@ -303,6 +304,7 @@ class VPhoneVirtualMachineAppDelegate: NSObject, NSApplicationDelegate {
                 mc?.updateAppsAvailability(available: false)
                 mc?.updateURLAvailability(available: false)
                 mc?.updateClipboardAvailability(available: false)
+                mc?.shakeMenuItem?.isEnabled = false
                 mc?.updateSettingsAvailability(available: false)
                 mc?.updateRestartAvailability(available: false)
                 mc?.updateShutDownAvailability(available: false)

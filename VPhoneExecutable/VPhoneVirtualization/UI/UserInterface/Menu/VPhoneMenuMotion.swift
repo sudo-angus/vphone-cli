@@ -9,7 +9,22 @@ extension VPhoneMenuController {
         menu.autoenablesItems = false
         menu.addItem(makePanelItem(.gyroscope, "3D Gyroscope", keyEquivalent: "", symbol: "gyroscope"))
         menu.addItem(makePanelItem(.attitude, "Device Attitude", keyEquivalent: "", symbol: "rotate.3d"))
+        let shake = NSMenuItem(title: VPhoneLocalization.text("Shake"), action: #selector(shakeGuest), keyEquivalent: "")
+        shake.target = self
+        shake.isEnabled = false
+        menu.addItem(.separator())
+        menu.addItem(shake)
+        shakeMenuItem = shake
         item.submenu = menu
         return item
+    }
+
+    @objc func shakeGuest() {
+        Task {
+            do { _ = try await control.call("input.shake") }
+            catch {
+                VPhoneAlert.present(title: "Shake", message: String(describing: error), style: .warning)
+            }
+        }
     }
 }

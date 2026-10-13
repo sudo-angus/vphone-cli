@@ -891,3 +891,22 @@ The listener accepts the address specified by the user. For local-only use,
 pass `127.0.0.1` or `[::1]`. Any other address prints a warning: every machine
 that can reach it needs only the token, which travels in clear text over
 plain HTTP, so use it only on a trusted network.
+
+## Local guest VPN proxy and shake
+
+This fork adds capabilities `socks5` and `motion_shake`. Calls use the existing
+RPC transport (`POST /v1/rpc` or the WebSocket API), not additional VSOCK ports:
+
+- `network.socks5.get {}` reports `enabled`, actual `port`, `saved_port`,
+  `transport: "tcp-ip"`, and `udp_associate: true`.
+- `network.socks5.set {"port":1080}` enables TCP CONNECT and UDP ASSOCIATE on
+  guest TCP/IP port 1080. Ports 1024–65535 are accepted; `0` disables the
+  listener and cancels sessions. The setting survives guest restarts. DNS and
+  target connections run in the guest and follow its iOS VPN. The service is
+  off by default, carries no authentication, and is intended for trusted NAT
+  networks. A bind failure preserves the existing listener.
+- `input.shake {}` injects UIKit's shake event into the injectable foreground
+  user app. Success means the event was scheduled, not that the app handled it.
+
+See [migration and network acceptance](../Documents/Guides/local-migration.md)
+for the two VPN directions, NAT/UDP constraints and the cutover procedure.

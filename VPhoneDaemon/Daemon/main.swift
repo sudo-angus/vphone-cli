@@ -5,6 +5,7 @@ import NIOPosix
 import NIOWebSocket
 import VphonedNative
 
+vp_socks5_raise_fd_limit()
 let mode = vp_native_process_mode()
 if mode != 1 {
     guard mode == 0 else { exit(64) }
@@ -26,6 +27,7 @@ _ = vp_hid_load()
 GuestIrisinInstaller.refreshBootstrapOnStartup()
 GuestAPI.restoreUSBSerialOnStartup()
 GuestStaticNames.shared.restoreOnStartup()
+GuestSocks5.shared.restoreOnStartup()
 // locationd can deadlock as it starts; this restarts it.
 GuestLocationdWatchdog.shared.startOnStartup()
 

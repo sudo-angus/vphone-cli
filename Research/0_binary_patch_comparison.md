@@ -1,4 +1,12 @@
 # Patch Comparison: Regular / Development / Jailbreak / Experimental
+> **Local upstream migration (2026-10-13):** branch `codex/upstream-v2-migration`
+> adopts upstream `35d8e8f2` and its complete patch catalogue and presets.
+> No local kernel, boot-chain or DSC patch is added or retargeted. The former
+> dev-only EXC_GUARD change is retired in favor of the upstream iOS-18 gate.
+> Local guest resource changes are TCP/IP SOCKS5 with saved opt-in settings,
+> UIKit shake injection, and exclusion of critical platform processes from
+> libcamfix's app hooks. Runtime acceptance on a fresh schema 2 VM is pending;
+> see [migration and acceptance](../Documents/Guides/local-migration.md).
 
 > **iOS 27 locationd startup (2026-10-08):**
 > `system-locationd-cfw-disable_auto_cohort` disables only `CLAutoCohort` in

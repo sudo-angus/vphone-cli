@@ -128,7 +128,11 @@ static void cfx_on_add_image(const struct mach_header *mh, intptr_t slide) {
 
 __attribute__((constructor))
 static void cfx_init(void) {
-  cfxlog(@"libcamfix loaded into %@ (pid=%d)",
+// Framework-based injection also loads this library into platform daemons.
+// Keep their UI and watchdog paths outside app camera swizzles.
+NSString *process = NSProcessInfo.processInfo.processName ?: @"";
+if ([@[ @"SpringBoard", @"backboardd", @"assertiond", @"runningboardd", @"watchdogd", @"powerd" ] containsObject:process]) return;
+cfxlog(@"libcamfix loaded into %@ (pid=%d)",
          NSProcessInfo.processInfo.processName ?: @"?", getpid());
   // _dyld_register_func_for_add_image fires the callback synchronously
   // for every already-loaded image, then once per future image. So

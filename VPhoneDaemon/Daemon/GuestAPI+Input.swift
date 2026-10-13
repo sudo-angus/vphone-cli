@@ -1,6 +1,7 @@
 import CoreFoundation
 import Foundation
 import IcliKit
+import VphonedNative
 
 // MARK: - Buttons, Text, Gestures
 
@@ -8,6 +9,12 @@ extension GuestAPI {
     /// Gesture coordinates are screen points, as `device.screen` reports them.
     static func executeInput(_ method: String, _ params: [String: Any]) throws -> [String: Any]? {
         switch method {
+        case "input.shake":
+            let result = vp_motion_shake() as? [String: Any] ?? [:]
+            guard result["success"] as? Bool == true else {
+                throw GuestAPIError.operationFailed(result["error"] as? String ?? "Shake injection failed")
+            }
+            return result
         case "input.button":
             return try pressButton(string(params, "name"))
         case "input.key":

@@ -2,8 +2,11 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include "VphonedSocks5.h"
 #ifdef __OBJC__
 #import <Foundation/Foundation.h>
+/// Deliver UIKit's shake event to the injectable foreground user app.
+NSDictionary *vp_motion_shake(void);
 #endif
 
 /// Sign all executable code in an extracted app. Returns a malloc-owned error or NULL.
