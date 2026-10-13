@@ -51,7 +51,7 @@ vphone-launchpad-cli guest rpc test-vm network.socks5.get
 | USB 转发/Python workaround | 删除旧封装，采用上游网络与端口转发 |
 | 剪贴板、软键盘、应用/文件 UI | 使用上游界面，导入旧机走兼容控制协议 |
 
-旧代码保留在 `codex/legacy-vphone-rollback`。两处原始 WIP 的具名 stash 为：
+旧代码保留在 `codex/legacy-vphone-rollback`；合并后遗留的旧子模块和生成文件收在原 checkout 的 `.build/legacy-checkout-remnants-20261013/`，回退时可按原相对路径取回，没有删除。两处原始 WIP 的具名 stash 为：
 
 `b55b68e59e26269a3c7ad4e26d5a44ed46db382e`
 

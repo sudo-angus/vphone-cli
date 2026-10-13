@@ -20,5 +20,5 @@
 
 ## 回退与原始改动
 
-- 旧代码保留在 `codex/legacy-vphone-rollback`，原两处未提交改动保留在具名 Git stash（见迁移指南）。camfix 的核心进程排除已迁入新代码；旧 HealthMonitor 的改动随 Manager 退役，保留备份。
+- 旧子模块和生成文件保留在原 checkout 的 `.build/legacy-checkout-remnants-20261013/`，没有删除。旧代码保留在 `codex/legacy-vphone-rollback`，原两处未提交改动保留在具名 Git stash（见迁移指南）。camfix 的核心进程排除已迁入新代码；旧 HealthMonitor 的改动随 Manager 退役，保留备份。
 - 不对当前已认证 VM 执行 restore、CFW 环境更新或身份重建。需要停止、切回旧机或变更当前代理时先通知使用者。
