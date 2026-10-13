@@ -4,7 +4,7 @@
 
 - 验证日期：2026-10-13；宿主 macOS 26.3.1（25D2128），Xcode 26.3（17C529）。
 - 迁移分支：`codex/upstream-v2-migration`，独立 worktree。完整吸收上游 `35d8e8f2`，旧 Manager 源码及旧运行时已删除。
-- 迁移代码已提交，尚未推送或合入 `develop`。已安装并启动已公证的 Launchpad 2.9.2；Core Bundle 和 helper 尚未安装，未创建或启动新 VM。原 checkout 仍在 `develop`，两处 WIP 保留。
+- 迁移代码已提交，尚未推送或合入 `develop`。已安装并启动已公证的 Launchpad 2.9.2；使用者已完成 Host Setup；helper 16 已安装，签名与官方 Launchpad 一致。Core Bundle 尚未安装，未创建或启动新 VM。原 checkout 仍在 `develop`，两处 WIP 保留。
 - 使用者已退出旧 Manager，旧 VM 也已停止。旧应用、完整 VM 数据和设备身份原样保留；旧 amfidont 流程仍在运行。
 
 ## 已验证

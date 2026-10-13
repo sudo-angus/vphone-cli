@@ -71,6 +71,8 @@ withdrawn.
 
 Launchpad 2.9.2 is installed at `/Applications/vphone-launchpad.app`, verified
 against the release SHA-256 and accepted as a Notarized Developer ID app.
-It is running. Its CLI reports no Core Bundle, no helper and no machines in its
-current default library. No new VM was created, and no old guest file, identity,
+It is running. The user completed Host Setup and installed helper 16. Its
+signature matches the notarized Launchpad's developer; CLI status reports
+`hostReady: true`, `canInstallBundles: true` and `helper: ready (16)`. No Core
+Bundle or machines are installed in the current default library. No new VM was created, and no old guest file, identity,
 manifest or disk was modified during this investigation.
