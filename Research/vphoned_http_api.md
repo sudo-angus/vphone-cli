@@ -907,6 +907,3 @@ RPC transport (`POST /v1/rpc` or the WebSocket API), not additional VSOCK ports:
   networks. A bind failure preserves the existing listener.
 - `input.shake {}` injects UIKit's shake event into the injectable foreground
   user app. Success means the event was scheduled, not that the app handled it.
-
-See [migration and network acceptance](../Documents/Guides/local-migration.md)
-for the two VPN directions, NAT/UDP constraints and the cutover procedure.

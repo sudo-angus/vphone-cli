@@ -20,8 +20,7 @@
 
 ## 回退与原始改动
 
-- 旧子模块和生成文件保留在原 checkout 的 `.build/legacy-checkout-remnants-20261013/`；其中的旧 Manager 应用副本已清理。旧代码保留在 `codex/legacy-vphone-rollback`，原两处未提交改动保留在具名 Git stash（见迁移指南）。camfix 的核心进程排除已迁入新代码；旧 HealthMonitor 的改动随 Manager 退役，保留备份。
+- 旧子模块和生成文件保留在原 checkout 的 `.build/legacy-checkout-remnants-20261013/`；其中的旧 Manager 应用副本已清理。旧代码保留在 `codex/legacy-vphone-rollback`，原两处未提交改动保留在具名 Git stash `b55b68e59e26269a3c7ad4e26d5a44ed46db382e`。camfix 的核心进程排除已迁入新代码；旧 HealthMonitor 的改动随 Manager 退役，保留备份。
 - 不对当前已认证 VM 执行 restore、CFW 环境更新或身份重建。需要停止、切回旧机或变更当前代理时先通知使用者。
 
 - 旧 Manager 的应用、旧 debug/release 可执行入口、`com.vphone.manager` 偏好和用户态 AMFI supervisor 已清理；Dock 无旧固定入口。`/etc/sudoers.d/vphone` 仍在，删除需管理员密码；旧 root AMFI worker 留到停机维护，未终止当前 VM。新 Launchpad/helper 使用独立的签名安装和权限流程。
-- 新电脑按[切换指南](Documents/Guides/local-migration.md#新电脑切换到-launchpad)安装官方 App 与本仓库 Core。此次提交尚未由助手推送；本轮远端读取因 1Password SSH agent 签名失败而未完成。

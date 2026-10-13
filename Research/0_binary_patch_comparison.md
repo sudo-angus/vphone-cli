@@ -5,8 +5,7 @@
 > dev-only EXC_GUARD change is retired in favor of the upstream iOS-18 gate.
 > Local guest resource changes are TCP/IP SOCKS5 with saved opt-in settings,
 > UIKit shake injection, and exclusion of critical platform processes from
-> libcamfix's app hooks. Runtime acceptance on an identity-preserving legacy VM copy is pending;
-> see [migration and acceptance](../Documents/Guides/local-migration.md).
+> libcamfix's app hooks. See [current local runtime state](../PROGRESS.md).
 
 > **iOS 27 locationd startup (2026-10-08):**
 > `system-locationd-cfw-disable_auto_cohort` disables only `CLAutoCohort` in
