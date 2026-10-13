@@ -1,30 +1,24 @@
 # 迁移状态
 
-## 当前状态
+## 当前运行状态
 
-- 验证日期：2026-10-13；宿主 macOS 26.3.1（25D2128），Xcode 26.3（17C529）。
-- 迁移分支：`codex/upstream-v2-migration`，独立 worktree。完整吸收上游 `35d8e8f2`，旧 Manager 源码及旧运行时已删除。
-- 迁移代码已提交，尚未推送或合入 `develop`。已安装并启动已公证的 Launchpad 2.9.2；使用者已完成 Host Setup；helper 16 已安装，签名与官方 Launchpad 一致。Core Bundle 尚未安装，未创建或启动新 VM。原 checkout 仍在 `develop`，两处 WIP 保留。
-- 使用者已退出旧 Manager，旧 VM 也已停止。旧应用、完整 VM 数据和设备身份原样保留；旧 amfidont 流程仍在运行。
+- 2026-10-13，本机旧 VM 在新版 Launchpad 下验收通过。宿主 macOS 26.3.1（25D2128），guest iOS 26.1.0，Xcode 26.3（17C529）。这是本机这台旧设备的实测组合，不扩展为所有固件的兼容保证。
+- Launchpad 2.9.2 和 helper 16 已安装。运行中的 `DefaultVM` 位于 `~/.vphone/machines/DefaultVM`，绑定 Core `2.9.3-local.0b0ec0e1`（代码提交 `633111c7`）。Launchpad 启动后 23 秒完成旧 guest 握手。
+- 完整吸收上游 `35d8e8f2`；旧 Manager 源码和旧运行时已删除。迁移分支 `codex/upstream-v2-migration` 验收后快进合入 `develop`；尚未推送。
+- 原 `vm/` 的配置、NVRAM、SEP、ROM 指纹未变，磁盘通过 APFS CoW 保留为副本；ECID/UDID 与原设备一致。原设备保持停止，原目录和 `/Applications/VPhone.app` 留作回退，禁止与副本同时启动。
+- 使用者接手飞连和 Surge 配置后反馈“一切正常”；这是本机认证与日常网络的人工验收。自动 SOCKS 探测曾遇连接重置，未将它记录为自动公司网络测试通过。后续飞连和 Surge 规则由使用者处理。
 
-## 已验证
+## 实现与验证
 
-- `VPhone` 完整 bundle 构建、`VPhoneLaunchpad` 构建、bundle admission 和 `codesign --verify --strict --deep` 通过。
-- CoreKit：网络配置、tunnel 帧循环、TCP 转发、ZIP 共 66 项测试通过。
-- SOCKS5：真实 TCP/UDP、guest 侧域名解析路径、半关闭、64 路并发、绑定失败回退、会话取消和 30 次启停通过；AddressSanitizer/UndefinedBehaviorSanitizer 未报错。
-- SOCKS5 配置：非法输入、保存启用/禁用、重启恢复和保存失败回退通过。测试在 Mac 的临时文件和随机端口完成；没有使用运行中的 VM 或飞连。
-- daemon：324 项逻辑检查、148 项维护规则检查及 13 项 parser 检查通过；Launchpad 的 host policy、launcher policy、bundle binding 和 control 测试通过。
+- 旧 VM 显式目录导入保留身份、Disk/NVRAM/SEP/ROM；拒绝无效身份、缺失或链接状态文件、忙碌原机和覆盖目的目录。旧环境保持不动，由 host 兼容 VSOCK 1337；禁用旧机已禁用的加速器，使用软件键盘。
+- `VPhone` 完整签名 bundle、Launchpad 构建、bundle admission、安装 policy 和 host preflight 通过。
+- 旧导入/协议/manifest 20 项针对性测试通过；副本两次实际启动、guest ping 和应用列表通过，飞连仍安装并运行。
+- 网络/tunnel/TCP/ZIP 66 项测试通过；新 daemon SOCKS5 的 TCP/UDP、域名、半关闭、64 路并发、绑定回退、取消、30 次启停及 ASAN/UBSAN 通过。daemon 324 项逻辑、148 项维护规则、13 项 parser 检查和 Launchpad policy/binding/control 测试通过。
+- 本机使用 NAT。保留旧 guest 的直连 SOCKS5 `192.168.64.250:1080`，增加 host TCP 回环 `127.0.0.1:1080` 转发。旧 guest 不使用新的 `network.socks5.set` API；新 daemon 的 SOCKS5 默认为关闭。
+- 其他电脑的 guest → Mac VPN 路径采用上游 tunnel，需在那里验证公司 supplemental DNS、HTTP 与 UDP；本机验收不能证明那条路径。
+- 新固件的摇一摇、全量 UI 功能和长时间稳定性尚未逐项实机验证。不会为此自动重启当前设备或更新已认证 guest。
 
-## 必须保留的约束
+## 回退与原始改动
 
-- 本机关键路径是 **Mac → guest 内飞连 → 公司网络**。保留 guest TCP/IP SOCKS5，用 NAT 的固定 IP 与上游端口转发配置；服务默认关闭，通过 `network.socks5.set` 开启。
-- **guest → Mac VPN** 使用上游 tunnel，仍需在对应公司电脑验证。当前 tunnel 的默认 DNS 只取全局首个 IPv4 resolver，不能凭本机网络单元测试认定公司 supplemental DNS 可用。
-- 必须保留已认证的原设备；不重建、不 restore、不生成新身份。旧配置在临时副本中仅添加 schema 2 标记即可被新版 CLI 读取；原机器标识仍有效。启动兼容性尚待验证，详见 [旧 VM 导入研究](Research/Host/legacy_vm_import.md)。
-- 旧 VM 在新运行时的启动、guest 协议、飞连认证/网络和硬件设置尚未验收；1337→1339 协议及旧 VM 禁用加速器的配置必须兼容。当前 macOS 26.3.1 也不是上游兼容表中明确列出的组合。
-- 仅允许保留原数据和身份的迁移。未经副本验收，不改已认证原 VM 的固件、daemon 或硬件配置。只有实际验收成功才能合入 develop。
-
-## 下一步
-
-1. 旧 VM 的显式导入和旧协议兼容已实现，针对性 20 项测试通过；安装兼容 Core 后进行副本实机启动验证。
-2. 对已停止 VM 的 APFS 副本验证，保持同一身份，且不与原 VM 同时启动；核对既有飞连认证和公司网络。
-3. 验收成功后再将原 VM 注册或搬到 Launchpad 的库中，并合入 develop。此前保留旧启动方式。
+- 旧代码保留在 `codex/legacy-vphone-rollback`，原两处未提交改动保留在具名 Git stash（见迁移指南）。camfix 的核心进程排除已迁入新代码；旧 HealthMonitor 的改动随 Manager 退役，保留备份。
+- 不对当前已认证 VM 执行 restore、CFW 环境更新或身份重建。需要停止、切回旧机或变更当前代理时先通知使用者。

@@ -111,3 +111,26 @@ missing/invalid state refusal, destination/path refusal, same-identity activity
 checks, persistent concurrent JSON/binary framing, uploads, guest refusals and
 silent-peer timeouts. The complete signed VPhone bundle builds. Actual boot and
 corporate authentication acceptance remain separate gates.
+
+## Actual boot and user acceptance (2026-10-13)
+
+The APFS copy booted twice with the installed compatibility Core
+`2.9.3-local.0b0ec0e1` (source commit `633111c7`). The original config/NVRAM/SEP/ROM
+SHA-256 fingerprints remained unchanged, and the copy reported the exact same
+ECID/UDID. Its guest reports iOS 26.1.0 on macOS 26.3.1. Real legacy ping and
+apps.list succeeded; the installed Feilian app was still present and running.
+
+The tested copy was moved, while stopped, into `~/.vphone/machines/DefaultVM`,
+bound to that Core, then started through the notarized Launchpad with a visible
+VM window. Launchpad observed vphoned ready after 23 seconds. Original `vm/`
+remains stopped and untouched. NAT and the old guest's direct SOCKS5 alias are
+retained; host TCP 1080 forwards to guest 1080.
+
+An earlier test host port 11080 was occupied by an unrelated Java process, so
+its probe was not evidence about the VM. A direct guest SOCKS probe then reset.
+The user explicitly took ownership of Feilian and Surge rules, and subsequently
+reported everything normal. Corporate authentication/network acceptance is thus
+user-reported, not an automated HTTPS/UDP proof. No assistant operation enabled
+Feilian or modified Surge. New-firmware shake, all UI functions and prolonged
+stability remain unverified individually; do not restart the user's active VM
+or update its guest environment to expand those checks.
