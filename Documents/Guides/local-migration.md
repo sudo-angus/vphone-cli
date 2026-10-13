@@ -55,6 +55,53 @@ vphone-launchpad-cli guest rpc test-vm network.socks5.get
 
 `b55b68e59e26269a3c7ad4e26d5a44ed46db382e`
 
-camfix 改动已迁入新实现；旧 HealthMonitor 随 Manager 退役，原改动仍可从 stash 取回。旧 Manager 应用已移出 `/Applications`，保留在原 checkout 的 `.build/legacy-checkout-remnants-20261013/VPhone.app`；旧 `vm/` 仍保留。回退前先停止正在运行的副本，避免同一设备身份同时在线；停止当前 VM 必须先通知使用者。
+camfix 改动已迁入新实现；旧 HealthMonitor 随 Manager 退役，原改动仍可从 stash 取回。旧 Manager 应用、构建副本、旧可执行入口和偏好已删除；旧 `vm/` 仍保留。回退前先停止正在运行的副本，避免同一设备身份同时在线；停止当前 VM 必须先通知使用者。
 
 新固件摇一摇、全量 UI 功能和长时间稳定性尚未逐项实机验证。迁移验收后合入 `develop`，不因此自动移除旧设备备份或推送远端。
+
+## 新电脑切换到 Launchpad
+
+此次改造先在本机 `develop` 合入，尚未由助手推送。其他电脑需要先取得这些提交，再按以下步骤切换。官方 App 可以配合本仓库的 Core；只安装上游 Core 不包含本仓库的旧设备兼容和 guest SOCKS5 扩展。
+
+1. 从[官方 2.9.2 发布页](https://github.com/Lakr233/vphone-cli/releases/tag/2.9.2)下载 `vphone-launchpad-2.9.2-notarized.zip`，解压后把 `vphone-launchpad.app` 放到 `/Applications`。2.9.2 App 兼容 2.9.x Core；不安装本地未签名的 Launchpad 构建。
+2. 打开 App，完成 Host Setup（包含 helper 安装与系统管理员授权）。宿主要求见[Host setup](host-setup.md)。本机已经完成，无需重装。
+3. 在这台电脑的仓库中构建并安装我们的 Core：
+
+```sh
+git switch develop
+git pull --ff-only
+xcodebuild -workspace VPhone.xcworkspace -scheme VPhone \
+  -configuration Debug -destination 'platform=macOS,arch=arm64' \
+  -derivedDataPath .build/XcodeBundle build
+
+LP=/Applications/vphone-launchpad.app/Contents/MacOS/vphone-launchpad-cli
+"$LP" bundle install-local .build/XcodeBundle/Build/Products/Debug/VPhone.bundle
+"$LP" status
+```
+
+安装输出中的 `version` 是该电脑构建的 `2.9.3-local.<hash>`，不同电脑可能不同。安装完成后 `hostReady`、`bundleReady` 应为 true。
+
+4. 若要保留已有旧 VM，先在旧 Manager 里停止它并退出 Manager，确定原机目录中有 `config.plist` 和原设备状态；再导入。以下以仓库的 `vm/` 为例：
+
+```sh
+"$LP" exec vm import-legacy "$PWD/vm" --name DefaultVM
+# 使用上一步安装输出中的实际版本，不照抄本机的 hash。
+"$LP" vm set-bundle DefaultVM '2.9.3-local.<hash>'
+"$LP" vm start DefaultVM --wait
+```
+
+导入保留原身份、认证和设备状态，不创建另一台设备；原目录留作回退。禁止原 VM 与导入副本同时启动。需要 host 回环 TCP SOCKS5 转发时，在导入命令加 `--socks5-host-port <空闲端口>`；使用直连 guest SOCKS5 不必加。若没有旧 VM，直接在 App 中点 New Machine，使用已安装的本地 Core 创建。
+
+5. Mac → guest VPN 保持 NAT，飞连和 Surge 规则由使用者配置。guest → Mac VPN 才选择 tunnel，配置从下次启动生效，并在那台电脑验证公司 DNS 和 HTTPS。旧设备的 guest 控制功能受原 daemon 支持范围限制。
+
+## 旧 Manager 清理状态
+
+本机 `/Applications/VPhone.app`、两份构建应用副本、旧 debug/release 可执行入口、偏好和用户态 AMFI supervisor 已清理。官方 Launchpad、helper、Core 和运行中的 VM 保留。
+
+旧 Manager 的独立授权文件 `/etc/sudoers.d/vphone` 仍需管理员密码删除。它不属于 Launchpad helper。终端可执行：
+
+```sh
+sudo rm -f /etc/sudoers.d/vphone
+```
+
+旧 root amfidont worker 暂留到停机维护。迁移的原 `vm/`、旧代码分支、WIP stash 和旧子模块备份仍保留；尚未进行全量备份删除。

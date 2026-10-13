@@ -5,7 +5,7 @@
 - 2026-10-13，本机旧 VM 在新版 Launchpad 下验收通过。宿主 macOS 26.3.1（25D2128），guest iOS 26.1.0，Xcode 26.3（17C529）。这是本机这台旧设备的实测组合，不扩展为所有固件的兼容保证。
 - Launchpad 2.9.2 和 helper 16 已安装。运行中的 `DefaultVM` 位于 `~/.vphone/machines/DefaultVM`，绑定 Core `2.9.3-local.0b0ec0e1`（代码提交 `633111c7`）。Launchpad 启动后 23 秒完成旧 guest 握手。
 - 完整吸收上游 `35d8e8f2`；旧 Manager 源码和旧运行时已删除。迁移分支 `codex/upstream-v2-migration` 验收后快进合入 `develop`；尚未推送。
-- 原 `vm/` 的配置、NVRAM、SEP、ROM 指纹未变，磁盘通过 APFS CoW 保留为副本；ECID/UDID 与原设备一致。原设备保持停止，原目录留作回退；旧 Manager 应用已移出 `/Applications`，收在 `.build/legacy-checkout-remnants-20261013/VPhone.app`，禁止与副本同时启动。
+- 原 `vm/` 的配置、NVRAM、SEP、ROM 指纹未变，磁盘通过 APFS CoW 保留为副本；ECID/UDID 与原设备一致。原设备保持停止，原目录留作回退；旧 Manager 应用及构建副本已删除；原设备与副本禁止同时启动。
 - 使用者接手飞连和 Surge 配置后反馈“一切正常”；这是本机认证与日常网络的人工验收。自动 SOCKS 探测曾遇连接重置，未将它记录为自动公司网络测试通过。后续飞连和 Surge 规则由使用者处理。
 
 ## 实现与验证
@@ -20,5 +20,8 @@
 
 ## 回退与原始改动
 
-- 旧子模块和生成文件保留在原 checkout 的 `.build/legacy-checkout-remnants-20261013/`，没有删除。旧代码保留在 `codex/legacy-vphone-rollback`，原两处未提交改动保留在具名 Git stash（见迁移指南）。camfix 的核心进程排除已迁入新代码；旧 HealthMonitor 的改动随 Manager 退役，保留备份。
+- 旧子模块和生成文件保留在原 checkout 的 `.build/legacy-checkout-remnants-20261013/`；其中的旧 Manager 应用副本已清理。旧代码保留在 `codex/legacy-vphone-rollback`，原两处未提交改动保留在具名 Git stash（见迁移指南）。camfix 的核心进程排除已迁入新代码；旧 HealthMonitor 的改动随 Manager 退役，保留备份。
 - 不对当前已认证 VM 执行 restore、CFW 环境更新或身份重建。需要停止、切回旧机或变更当前代理时先通知使用者。
+
+- 旧 Manager 的应用、旧 debug/release 可执行入口、`com.vphone.manager` 偏好和用户态 AMFI supervisor 已清理；Dock 无旧固定入口。`/etc/sudoers.d/vphone` 仍在，删除需管理员密码；旧 root AMFI worker 留到停机维护，未终止当前 VM。新 Launchpad/helper 使用独立的签名安装和权限流程。
+- 新电脑按[切换指南](Documents/Guides/local-migration.md#新电脑切换到-launchpad)安装官方 App 与本仓库 Core。此次提交尚未由助手推送；本轮远端读取因 1Password SSH agent 签名失败而未完成。
