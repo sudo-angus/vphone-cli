@@ -5,7 +5,7 @@
 - 2026-10-13，本机旧 VM 在新版 Launchpad 下验收通过。宿主 macOS 26.3.1（25D2128），guest iOS 26.1.0，Xcode 26.3（17C529）。这是本机这台旧设备的实测组合，不扩展为所有固件的兼容保证。
 - Launchpad 2.9.2 和 helper 16 已安装。运行中的 `DefaultVM` 位于 `~/.vphone/machines/DefaultVM`，绑定 Core `2.9.3-local.0b0ec0e1`（代码提交 `633111c7`）。Launchpad 启动后 23 秒完成旧 guest 握手。
 - 完整吸收上游 `35d8e8f2`；旧 Manager 源码和旧运行时已删除。迁移分支 `codex/upstream-v2-migration` 验收后快进合入 `develop`；尚未推送。
-- 原 `vm/` 的配置、NVRAM、SEP、ROM 指纹未变，磁盘通过 APFS CoW 保留为副本；ECID/UDID 与原设备一致。原设备保持停止，原目录和 `/Applications/VPhone.app` 留作回退，禁止与副本同时启动。
+- 原 `vm/` 的配置、NVRAM、SEP、ROM 指纹未变，磁盘通过 APFS CoW 保留为副本；ECID/UDID 与原设备一致。原设备保持停止，原目录留作回退；旧 Manager 应用已移出 `/Applications`，收在 `.build/legacy-checkout-remnants-20261013/VPhone.app`，禁止与副本同时启动。
 - 使用者接手飞连和 Surge 配置后反馈“一切正常”；这是本机认证与日常网络的人工验收。自动 SOCKS 探测曾遇连接重置，未将它记录为自动公司网络测试通过。后续飞连和 Surge 规则由使用者处理。
 
 ## 实现与验证

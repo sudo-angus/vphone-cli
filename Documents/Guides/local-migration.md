@@ -55,6 +55,6 @@ vphone-launchpad-cli guest rpc test-vm network.socks5.get
 
 `b55b68e59e26269a3c7ad4e26d5a44ed46db382e`
 
-camfix 改动已迁入新实现；旧 HealthMonitor 随 Manager 退役，原改动仍可从 stash 取回。原 `/Applications/VPhone.app` 和旧 `vm/` 保留。回退前先停止正在运行的副本，避免同一设备身份同时在线；停止当前 VM 必须先通知使用者。
+camfix 改动已迁入新实现；旧 HealthMonitor 随 Manager 退役，原改动仍可从 stash 取回。旧 Manager 应用已移出 `/Applications`，保留在原 checkout 的 `.build/legacy-checkout-remnants-20261013/VPhone.app`；旧 `vm/` 仍保留。回退前先停止正在运行的副本，避免同一设备身份同时在线；停止当前 VM 必须先通知使用者。
 
 新固件摇一摇、全量 UI 功能和长时间稳定性尚未逐项实机验证。迁移验收后合入 `develop`，不因此自动移除旧设备备份或推送远端。
