@@ -22,10 +22,12 @@ build_project() {
         PATH="/usr/bin:/bin:/usr/sbin:/sbin" /usr/bin/xcodebuild "$@"
 }
 
+# Restore and command share products so Clang sees one OpenSSL module map.
+# Separate product roots both export include/module.modulemap as libssl.
 build_project -project "$root/VPhoneExecutable/VPhoneCommand/VPhoneRestore/VPhoneRestore.xcodeproj" \
     -scheme VPhoneRestore -configuration "$configuration" \
     -destination 'platform=macOS,arch=arm64' \
-    -derivedDataPath "$root/.build/XcodeRestore" CODE_SIGNING_ALLOWED=NO build
+    -derivedDataPath "$root/.build/XcodeCommand" CODE_SIGNING_ALLOWED=NO build
 
 build_project -project "$root/VPhoneExecutable/VPhoneCommand/VPhoneCommand.xcodeproj" \
     -scheme VPhoneCommand -configuration "$configuration" \

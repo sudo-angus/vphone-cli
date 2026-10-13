@@ -74,17 +74,27 @@ struct RemoteZipTests {
             le16(value & 0xFFFF) + le16(value >> 16 & 0xFFFF)
         }
         let nameBytes = Array(name.utf8)
-        var data: [UInt8] = [0x50, 0x4B, 0x03, 0x04] + le16(20) + le16(0) + le16(0) + le16(0) + le16(0)
-            + le32(0) + le32(contents.count) + le32(contents.count) + le16(nameBytes.count) + le16(0)
-        data += nameBytes + Array(contents)
+        var data: [UInt8] = [0x50, 0x4B, 0x03, 0x04]
+        for field in [20, 0, 0, 0, 0] { data += le16(field) }
+        for field in [0, contents.count, contents.count] { data += le32(field) }
+        data += le16(nameBytes.count)
+        data += le16(0)
+        data += nameBytes
+        data += Array(contents)
         let directoryOffset = data.count
-        data += [0x50, 0x4B, 0x01, 0x02] + le16(20) + le16(20) + le16(0) + le16(0) + le16(0) + le16(0)
-            + le32(0) + le32(contents.count) + le32(contents.count) + le16(nameBytes.count) + le16(0) + le16(0)
-            + le16(0) + le16(0) + le32(0) + le32(0)
+        data += [0x50, 0x4B, 0x01, 0x02]
+        for field in [20, 20, 0, 0, 0, 0] { data += le16(field) }
+        for field in [0, contents.count, contents.count] { data += le32(field) }
+        for field in [nameBytes.count, 0, 0, 0, 0] { data += le16(field) }
+        data += le32(0)
+        data += le32(0)
         data += nameBytes
         let directorySize = data.count - directoryOffset
-        data += [0x50, 0x4B, 0x05, 0x06] + le16(0) + le16(0) + le16(1) + le16(1)
-            + le32(directorySize) + le32(directoryOffset) + le16(0)
+        data += [0x50, 0x4B, 0x05, 0x06]
+        for field in [0, 0, 1, 1] { data += le16(field) }
+        data += le32(directorySize)
+        data += le32(directoryOffset)
+        data += le16(0)
         return Data(data)
     }
 

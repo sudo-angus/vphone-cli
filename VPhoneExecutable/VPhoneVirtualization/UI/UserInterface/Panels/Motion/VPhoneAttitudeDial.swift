@@ -264,8 +264,8 @@ struct VPhoneAttitudeLinearScale: View {
             }
             .frame(width: vertical ? geometry.size.width : 720, height: vertical ? 720 : geometry.size.height)
             .offset(
-                x: vertical ? 0 : geometry.size.width / 2 - 360 - value * 2,
-                y: vertical ? geometry.size.height / 2 - 360 + value * 2 : 0,
+                x: vertical ? 0 : geometry.size.width / 2 - 360 - CGFloat(value) * 2,
+                y: vertical ? geometry.size.height / 2 - 360 + CGFloat(value) * 2 : 0,
             )
             Rectangle().fill(color)
                 .frame(width: vertical ? 20 : 2, height: vertical ? 2 : 20)

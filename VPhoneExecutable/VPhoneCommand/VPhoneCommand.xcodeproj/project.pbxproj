@@ -551,7 +551,7 @@
 				LIBRARY_SEARCH_PATHS = (
 					"$(BUILT_PRODUCTS_DIR)",
 					"$(SRCROOT)/../../.build/XcodeKit/Build/Products/$(CONFIGURATION)",
-					"$(SRCROOT)/../../.build/XcodeRestore/Build/Products/$(CONFIGURATION)",
+					"$(SRCROOT)/../../.build/XcodeCommand/Build/Products/$(CONFIGURATION)",
 				);
 				LD_RUNPATH_SEARCH_PATHS = (
 					"@executable_path/../Frameworks",
@@ -572,7 +572,7 @@
 				PRODUCT_MODULE_NAME = VPhoneCommand;
 				PRODUCT_NAME = "vphone-cli";
 				SDKROOT = macosx;
-				SWIFT_INCLUDE_PATHS = "$(BUILT_PRODUCTS_DIR) $(SRCROOT)/../../.build/XcodeKit/Build/Products/$(CONFIGURATION) $(SRCROOT)/../../.build/XcodeRestore/Build/Products/$(CONFIGURATION)";
+				SWIFT_INCLUDE_PATHS = "$(BUILT_PRODUCTS_DIR) $(SRCROOT)/../../.build/XcodeKit/Build/Products/$(CONFIGURATION) $(SRCROOT)/../../.build/XcodeCommand/Build/Products/$(CONFIGURATION)";
 				SWIFT_STRICT_CONCURRENCY = complete;
 				SWIFT_VERSION = 6.0;
 			};
@@ -592,7 +592,7 @@
 				LIBRARY_SEARCH_PATHS = (
 					"$(BUILT_PRODUCTS_DIR)",
 					"$(SRCROOT)/../../.build/XcodeKit/Build/Products/$(CONFIGURATION)",
-					"$(SRCROOT)/../../.build/XcodeRestore/Build/Products/$(CONFIGURATION)",
+					"$(SRCROOT)/../../.build/XcodeCommand/Build/Products/$(CONFIGURATION)",
 				);
 				LD_RUNPATH_SEARCH_PATHS = (
 					"@executable_path/../Frameworks",
@@ -613,7 +613,7 @@
 				PRODUCT_MODULE_NAME = VPhoneCommand;
 				PRODUCT_NAME = "vphone-cli";
 				SDKROOT = macosx;
-				SWIFT_INCLUDE_PATHS = "$(BUILT_PRODUCTS_DIR) $(SRCROOT)/../../.build/XcodeKit/Build/Products/$(CONFIGURATION) $(SRCROOT)/../../.build/XcodeRestore/Build/Products/$(CONFIGURATION)";
+				SWIFT_INCLUDE_PATHS = "$(BUILT_PRODUCTS_DIR) $(SRCROOT)/../../.build/XcodeKit/Build/Products/$(CONFIGURATION) $(SRCROOT)/../../.build/XcodeCommand/Build/Products/$(CONFIGURATION)";
 				SWIFT_STRICT_CONCURRENCY = complete;
 				SWIFT_VERSION = 6.0;
 			};
@@ -667,7 +667,7 @@
 				LIBRARY_SEARCH_PATHS = (
 					"$(BUILT_PRODUCTS_DIR)",
 					"$(SRCROOT)/../../.build/XcodeKit/Build/Products/$(CONFIGURATION)",
-					"$(SRCROOT)/../../.build/XcodeRestore/Build/Products/$(CONFIGURATION)",
+					"$(SRCROOT)/../../.build/XcodeCommand/Build/Products/$(CONFIGURATION)",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 15.0;
 				OTHER_LDFLAGS = (
@@ -679,7 +679,7 @@
 				PRODUCT_NAME = FirmwarePatcher;
 				SDKROOT = macosx;
 				SKIP_INSTALL = YES;
-				SWIFT_INCLUDE_PATHS = "$(BUILT_PRODUCTS_DIR) $(SRCROOT)/../../.build/XcodeKit/Build/Products/$(CONFIGURATION) $(SRCROOT)/../../.build/XcodeRestore/Build/Products/$(CONFIGURATION)";
+				SWIFT_INCLUDE_PATHS = "$(BUILT_PRODUCTS_DIR) $(SRCROOT)/../../.build/XcodeKit/Build/Products/$(CONFIGURATION) $(SRCROOT)/../../.build/XcodeCommand/Build/Products/$(CONFIGURATION)";
 				SWIFT_STRICT_CONCURRENCY = complete;
 				SWIFT_VERSION = 6.0;
 			};
@@ -695,7 +695,7 @@
 				LIBRARY_SEARCH_PATHS = (
 					"$(BUILT_PRODUCTS_DIR)",
 					"$(SRCROOT)/../../.build/XcodeKit/Build/Products/$(CONFIGURATION)",
-					"$(SRCROOT)/../../.build/XcodeRestore/Build/Products/$(CONFIGURATION)",
+					"$(SRCROOT)/../../.build/XcodeCommand/Build/Products/$(CONFIGURATION)",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 15.0;
 				OTHER_LDFLAGS = (
@@ -707,7 +707,7 @@
 				PRODUCT_NAME = FirmwarePatcher;
 				SDKROOT = macosx;
 				SKIP_INSTALL = YES;
-				SWIFT_INCLUDE_PATHS = "$(BUILT_PRODUCTS_DIR) $(SRCROOT)/../../.build/XcodeKit/Build/Products/$(CONFIGURATION) $(SRCROOT)/../../.build/XcodeRestore/Build/Products/$(CONFIGURATION)";
+				SWIFT_INCLUDE_PATHS = "$(BUILT_PRODUCTS_DIR) $(SRCROOT)/../../.build/XcodeKit/Build/Products/$(CONFIGURATION) $(SRCROOT)/../../.build/XcodeCommand/Build/Products/$(CONFIGURATION)";
 				SWIFT_STRICT_CONCURRENCY = complete;
 				SWIFT_VERSION = 6.0;
 			};
