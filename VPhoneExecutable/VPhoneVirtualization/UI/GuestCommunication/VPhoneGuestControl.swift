@@ -54,6 +54,8 @@ final class VPhoneGuestControl {
 
     // Windows observe the connection state below; transport state is not UI.
     @ObservationIgnored private weak var device: VZVirtioSocketDevice?
+    @ObservationIgnored var usesLegacyGuest = false
+    @ObservationIgnored private let legacy = VPhoneLegacyGuestControl()
     @ObservationIgnored private var monitor: Task<Void, Never>?
     @ObservationIgnored private var orderedInput: Task<Void, Never>?
     @ObservationIgnored private var orderedLocation: Task<Void, Never>?
@@ -181,6 +183,7 @@ final class VPhoneGuestControl {
     }
 
     func stop() {
+        legacy.stop()
         monitor?.cancel()
         monitor = nil
         orderedInput?.cancel()
@@ -233,7 +236,7 @@ final class VPhoneGuestControl {
             }
             if !isConnected {
                 isConnected = true
-                print("[control] connected to vphoned HTTP API (iOS \(guestIOSVersion ?? "?"))")
+                print("[control] connected to vphoned API (iOS \(guestIOSVersion ?? "?"))")
                 onConnect?(guestCapabilities)
                 let instance = info["instance"] as? String
                 let started = instance == nil || instance != connectedInstance
@@ -389,6 +392,10 @@ final class VPhoneGuestControl {
     /// Retains the UI-facing request shape while all transport and guest
     /// operations use the versioned HTTP API.
     func sendRequest(_ request: [String: Any]) async throws -> ([String: Any], Data?) {
+        if usesLegacyGuest {
+            guard let device else { throw ControlError.notConnected }
+            return try await legacy.send(request, device: device)
+        }
         guard let type = request["t"] as? String else {
             throw ControlError.protocolError("missing operation")
         }
@@ -455,6 +462,10 @@ final class VPhoneGuestControl {
     /// `message` and whatever the command adds (`results`, `reason`, `errno`,
     /// `retryable` …).
     private func rpc(_ method: String, params: [String: Any]) async throws -> [String: Any] {
+        if usesLegacyGuest {
+            guard let device else { throw ControlError.notConnected }
+            return try await legacy.call(method, params: params, device: device)
+        }
         let object: [String: Any] = ["id": UUID().uuidString, "method": method, "params": params]
         let body = try JSONSerialization.data(withJSONObject: object)
         let response = try await http(method: "POST", path: "/v1/rpc", body: body)
@@ -477,12 +488,22 @@ final class VPhoneGuestControl {
     }
 
     func downloadFile(path: String) async throws -> Data {
+        if usesLegacyGuest {
+            guard let device else { throw ControlError.notConnected }
+            guard let data = try await legacy.send(["t": "file_get", "path": path], device: device).1 else { throw ControlError.protocolError("missing file data") }
+            return data
+        }
         let response = try await http(method: "GET", path: filePath(path), limits: .download)
         guard response.status == 200 else { throw try httpError(response) }
         return response.body
     }
 
     func uploadFile(path: String, data: Data, permissions: String = "644") async throws {
+        if usesLegacyGuest {
+            guard let device else { throw ControlError.notConnected }
+            _ = try await legacy.send(["t": "file_put", "path": path, "size": data.count, "perm": permissions], payload: data, device: device)
+            return
+        }
         let response = try await http(
             method: "PUT",
             path: filePath(path, mode: permissions),
@@ -654,6 +675,10 @@ final class VPhoneGuestControl {
 
     /// The guest clipboard image as PNG.
     func clipboardImagePNG() async throws -> Data {
+        if usesLegacyGuest {
+            guard let image = try await clipboardGet().imageData else { throw ControlError.guestError("Guest clipboard has no image") }
+            return image
+        }
         let response = try await http(method: "GET", path: "/v1/clipboard/image")
         guard response.status == 200 else { throw try httpError(response) }
         return response.body
@@ -664,6 +689,11 @@ final class VPhoneGuestControl {
     }
 
     func clipboardSet(imageData: Data) async throws {
+        if usesLegacyGuest {
+            guard let device else { throw ControlError.notConnected }
+            _ = try await legacy.send(["t": "clipboard_set", "type": "image", "size": imageData.count], payload: imageData, device: device)
+            return
+        }
         let response = try await http(
             method: "PUT",
             path: "/v1/clipboard/image",
@@ -745,6 +775,11 @@ final class VPhoneGuestControl {
         limits: VPhoneHTTPLimits = .rpc,
     ) async throws -> VPhoneHTTPResponse {
         guard let device else { throw ControlError.notConnected }
+        if usesLegacyGuest {
+            guard method == "GET", path == "/v1/health" else { throw ControlError.unsupportedCapability(path) }
+            let health = try await legacy.health(device: device)
+            return try VPhoneHTTPResponse(status: 200, body: JSONSerialization.data(withJSONObject: health))
+        }
         let socket = await withCheckedContinuation {
             (continuation: CheckedContinuation<VPhoneSocketResult, Never>) in
             device.connect(toPort: 1339) { continuation.resume(returning: VPhoneSocketResult($0)) }

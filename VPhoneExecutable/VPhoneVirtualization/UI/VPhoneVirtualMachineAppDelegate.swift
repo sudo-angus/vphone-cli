@@ -113,12 +113,13 @@ class VPhoneVirtualMachineAppDelegate: NSObject, NSApplicationDelegate {
         let control = VPhoneGuestControl()
         self.control = control
         if !command.dfu {
+            control.usesLegacyGuest = vm.usesLegacyGuest
             control.unlocksAtStartup = vm.unlocksAtStartup
             control.syncsHostLocation = vm.syncsHostLocation
             control.guestDeviceName = Self.guestDeviceName(forConfig: options.configURL)
             startNetworkServices(vm: vm, control: control)
             let vphonedURL = URL(fileURLWithPath: command.vphonedBin)
-            if FileManager.default.fileExists(atPath: vphonedURL.path) {
+            if !vm.usesLegacyGuest, FileManager.default.fileExists(atPath: vphonedURL.path) {
                 control.guestBinaryURL = vphonedURL
             }
 

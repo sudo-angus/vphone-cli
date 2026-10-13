@@ -2974,3 +2974,13 @@ keep 60 Hz until `cfw update-kernel` or a restore writes it.
 
 **Opting out.** `vphone-cli fw set-patches <vm> --block
 kernel-cfw-display_promotion`, then `cfw update-kernel`.
+
+### Local legacy device import compatibility (2026-10-13)
+
+No firmware or kernel patch was added for legacy import. Imported schema-2
+manifests explicitly retain the old accelerator-disabled hardware configuration
+and original Disk/NVRAM/SEP/ROM/machineIdentifier. The existing guest daemon and
+hook environment remain unchanged; a host adapter speaks its VSOCK 1337 protocol
+and never sends an update handshake. Normal upstream guests retain the new
+accelerators and HTTP daemon. See `Research/Host/legacy_vm_import.md` for reveal,
+copy validation and the separate actual-boot/authentication acceptance gates.

@@ -9,6 +9,7 @@ class VPhoneVirtualMachine: NSObject, VZVirtualMachineDelegate {
     let virtualMachine: VZVirtualMachine
     /// The configuration actually used by this VM, rather than a pending preference.
     let usesHardwareKeyboard: Bool
+    let usesLegacyGuest: Bool
     /// The manifest's unlock-at-startup setting as the VM started with it.
     let unlocksAtStartup: Bool
     /// The manifest's Sync Host Location setting as the VM started with it.
@@ -64,6 +65,17 @@ class VPhoneVirtualMachine: NSObject, VZVirtualMachineDelegate {
         // --- Load or create machineIdentifier from manifest ---
         let machineIdentifier: VZMacMachineIdentifier
         var manifest = try VPhoneVirtualMachineManifest.load(from: options.configURL)
+        usesLegacyGuest = manifest.legacyGuestEnvironment == true
+        if usesLegacyGuest {
+            for (field, file) in manifest.bundleFileNames {
+                guard try VPhoneVirtualMachineManifest.requireRegularFileIfPresent(at: options.configURL.deletingLastPathComponent().appendingPathComponent(file)) else {
+                    throw VPhoneLegacyImport.Refusal("Imported VM is missing \(field); refusing to create replacement device state.")
+                }
+            }
+        }
+        if usesLegacyGuest, VZMacMachineIdentifier(dataRepresentation: manifest.machineIdentifier) == nil {
+            throw VPhoneManifestError.parseFailed(path: options.configURL.path)
+        }
 
         if !manifest.machineIdentifier.isEmpty,
            let savedID = VZMacMachineIdentifier(dataRepresentation: manifest.machineIdentifier)
@@ -225,7 +237,8 @@ class VPhoneVirtualMachine: NSObject, VZVirtualMachineDelegate {
             print("[vphone] PL011 serial port attached (interactive)")
         }
 
-        if let obj1 = Dynamic._VZMacVideoToolboxDeviceConfiguration().asObject,
+        if manifest.paravirtualAcceleratorsEnabled != false,
+           let obj1 = Dynamic._VZMacVideoToolboxDeviceConfiguration().asObject,
            let obj2 = Dynamic._VZMacNeuralEngineDeviceConfiguration().asObject,
            let obj3 = Dynamic._VZMacScalerAcceleratorDeviceConfiguration().asObject
         {

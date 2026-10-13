@@ -94,6 +94,10 @@ public struct VPhoneVirtualMachineManifest: Codable, Sendable {
 
     /// Missing in older manifests, which keep the original USB keyboard.
     public let hardwareKeyboardEnabled: Bool?
+    /// Imported 1.x guest: retain the existing daemon, protocol and environment.
+    public let legacyGuestEnvironment: Bool?
+    /// Nil uses the current defaults; imported legacy firmware can keep these off.
+    public let paravirtualAcceleratorsEnabled: Bool?
 
     public var usesHardwareKeyboard: Bool {
         hardwareKeyboardEnabled ?? true
@@ -359,6 +363,8 @@ public struct VPhoneVirtualMachineManifest: Codable, Sendable {
         sepStorage: String = "SEPStorage",
         guestProductType: String? = nil,
         hardwareKeyboardEnabled: Bool? = nil,
+        legacyGuestEnvironment: Bool? = nil,
+        paravirtualAcceleratorsEnabled: Bool? = nil,
         unlocksAtStartup: Bool? = nil,
         syncsHostLocation: Bool? = nil,
     ) {
@@ -376,6 +382,8 @@ public struct VPhoneVirtualMachineManifest: Codable, Sendable {
         self.sepStorage = sepStorage
         self.guestProductType = guestProductType
         self.hardwareKeyboardEnabled = hardwareKeyboardEnabled
+        self.legacyGuestEnvironment = legacyGuestEnvironment
+        self.paravirtualAcceleratorsEnabled = paravirtualAcceleratorsEnabled
         self.unlocksAtStartup = unlocksAtStartup
         self.syncsHostLocation = syncsHostLocation
     }
@@ -562,6 +570,8 @@ public struct VPhoneVirtualMachineManifest: Codable, Sendable {
             sepStorage: sepStorage,
             guestProductType: guestProductType,
             hardwareKeyboardEnabled: hardwareKeyboardEnabled ?? self.hardwareKeyboardEnabled,
+            legacyGuestEnvironment: legacyGuestEnvironment,
+            paravirtualAcceleratorsEnabled: paravirtualAcceleratorsEnabled,
             unlocksAtStartup: unlocksAtStartup ?? self.unlocksAtStartup,
             syncsHostLocation: syncsHostLocation ?? self.syncsHostLocation,
         )
@@ -585,6 +595,8 @@ public struct VPhoneVirtualMachineManifest: Codable, Sendable {
             sepStorage: sepStorage,
             guestProductType: device == .default ? nil : device.productType,
             hardwareKeyboardEnabled: hardwareKeyboardEnabled,
+            legacyGuestEnvironment: legacyGuestEnvironment,
+            paravirtualAcceleratorsEnabled: paravirtualAcceleratorsEnabled,
             unlocksAtStartup: unlocksAtStartup,
             syncsHostLocation: syncsHostLocation,
         )

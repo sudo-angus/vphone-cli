@@ -73,6 +73,41 @@ Launchpad 2.9.2 is installed at `/Applications/vphone-launchpad.app`, verified
 against the release SHA-256 and accepted as a Notarized Developer ID app.
 It is running. The user completed Host Setup and installed helper 16. Its
 signature matches the notarized Launchpad's developer; CLI status reports
-`hostReady: true`, `canInstallBundles: true` and `helper: ready (16)`. No Core
-Bundle or machines are installed in the current default library. No new VM was created, and no old guest file, identity,
+`hostReady: true`, `canInstallBundles: true` and `helper: ready (16)`. The user installed Core 2.9.3-local.e14eecc8; no machines are registered yet. No new VM was created, and no old guest file, identity,
 manifest or disk was modified during this investigation.
+
+## Implemented directory compatibility (2026-10-13)
+
+`vm import-legacy <directory> --name <name>` clones only Disk/NVRAM/SEP/ROM
+state with APFS CoW. It retains the original machineIdentifier byte-for-byte,
+backs up the original manifest inside the copy, refuses invalid identifiers,
+missing or symlinked storage, a busy original, and an existing destination. It
+publishes the copy atomically. The source is never rewritten. A receipt allows
+both CLI and VM runtime to refuse launch while that same-identity source is busy.
+
+The imported schema-2 manifest records `legacyGuestEnvironment: true`,
+`paravirtualAcceleratorsEnabled: false`, and the selected keyboard preference.
+Normal manifest edits preserve these flags. This opt-in applies only to imported
+legacy guests; current upstream guests keep the upstream behavior. Missing
+imported device state fails at launch rather than generating replacement storage.
+
+The host translates supported v2 RPC methods into the old framed-JSON protocol
+on VSOCK 1337. One persistent serialized stream carries complete JSON/binary
+exchanges. Length limits, a transaction deadline and a VSOCK-connect deadline
+bound failures. Hello omits bin_hash, .vphoned.signed is not staged, and the
+new guest/environment updater is not offered by the adapter. Unsupported newer
+operations fail explicitly. HTTP API export is refused for a legacy guest.
+The existing apps, clipboard, files, HID/touch, location, settings and shake
+operations are supported without replacing the guest daemon.
+
+`--socks5-host-port 1080` optionally forwards loopback TCP to the old guest's
+existing direct SOCKS5 service, learning its stable alias from the legacy hello.
+It retains NAT and guest routes. UDP clients should use the direct guest address,
+as before. No tunnel is needed for Mac -> guest Feilian VPN traffic.
+
+Targeted tests: 20 tests in LegacyImportTests, LegacyGuestSessionTests and
+ManifestTests passed. They cover cloned state/identity, source preservation,
+missing/invalid state refusal, destination/path refusal, same-identity activity
+checks, persistent concurrent JSON/binary framing, uploads, guest refusals and
+silent-peer timeouts. The complete signed VPhone bundle builds. Actual boot and
+corporate authentication acceptance remain separate gates.

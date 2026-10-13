@@ -37,10 +37,14 @@ struct VPhoneVirtualMachineLaunchCommand: ParsableCommand {
         }
         let name = try VPhoneVirtualMachineSelection.resolveExisting(name, in: lib.library)
         let bundle = try lib.library.bundle(named: name)
+        try VPhoneLegacyImport.requireSourceStopped(for: bundle)
         try VPhoneMachineTemplates.requireBootable(bundleURL: bundle.url)
         defer {
             do { try VPhoneHostFilePermissions.makeAccessible(at: bundle.url) }
             catch { fputs("warning: could not set VM file permissions: \(error)\n", stderr) }
+        }
+        if apiListen != nil, bundle.manifest.legacyGuestEnvironment == true {
+            throw ValidationError("An imported 1.x guest has no HTTP API. Use Launchpad guest RPC through vphone.sock instead.")
         }
         let resources = projectRoot.map { VPhoneResources(base: URL(fileURLWithPath: $0)) } ?? .resolve()
         let layout = VPhoneLaunchLayout(resources: resources)
@@ -56,7 +60,7 @@ struct VPhoneVirtualMachineLaunchCommand: ParsableCommand {
             FileHandle.standardError.write(Data("error: \(error)\n".utf8))
             throw ExitCode(1)
         }
-        if !dfu {
+        if !dfu, bundle.manifest.legacyGuestEnvironment != true {
             _ = try layout.stageVphoned(into: bundle)
         }
 
