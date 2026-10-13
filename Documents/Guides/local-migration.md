@@ -19,21 +19,21 @@
 
 ## 保护现有 VM
 
-旧 VM 是 schema 1，新上游只接受 schema 2。不要修改旧 `config.plist` 的 schema 字段、原地更新其 daemon、复制运行中的 `Disk.img`，也不要让 Launchpad 对旧 VM 执行环境更新。保留旧 checkout、`/Applications/VPhone.app` 和当前配置作为回退路径。
+必须保留已认证的旧设备。上游只接受 schema 2，但这不证明必须重建：旧配置的临时副本仅添加版本标记便可被新版 CLI 读取，原机器标识仍有效。旧 VM 导入需要处理 guest 协议和硬件设置，详见 [导入研究](../../Research/Host/legacy_vm_import.md)。未经副本验收，不修改原配置、daemon 或固件；不执行 restore 或生成新身份。保留旧 checkout、`/Applications/VPhone.app` 和完整原 VM 作为回退路径。
 
-新 bundle 在隔离 worktree 的 `.build/XcodeBundle/Build/Products/Debug/VPhone.bundle`，构建不会安装它。实际测试使用独立的 schema 2 VM、独立名字与地址。准备停当前 VM 或切换代理时先征得使用者同意；不要结束旧 amfidont、VM 或 Manager 进程。
+新 bundle 在隔离 worktree 的 `.build/XcodeBundle/Build/Products/Debug/VPhone.bundle`，构建不会安装它。后续先用已停止旧 VM 的 APFS 副本验证兼容，保留同一设备身份，且不与原 VM 同时运行。准备停当前 VM 或切换代理时先征得使用者同意；不要结束旧 amfidont、VM 或 Manager 进程。
 
 本地 Core Bundle 可按 [Launchpad CLI 指南](launchpad-cli.md)通过 `bundle install-local` 安装。优先使用已公证的上游 Launchpad 2.9.2，兼容本分支的 2.9.x bundle。编译出来的 Launchpad 未签名；没有 Developer ID 配置时不能安装它的 SMJobBless helper。
 
 ## Mac → guest 飞连 → 公司网络
 
-这台电脑采用 `nat`。先新建测试 VM（下面名字是示例），再执行：
+这台电脑采用 `nat`。以下是完成旧 VM 导入兼容后的副本验收示例，`corp-test` 是副本名称；当前尚未完成导入实现，不能直接套用到已认证原设备。
 
 ```sh
-# 只对新 VM 配置；旧 VM 的 .250 地址和 host 1080 当前正在使用。
+# 只对验收副本配置；原设备地址和代理设置保留用于回退。
 vphone-launchpad-cli exec vm config corp-test --network nat --ip 192.168.64.249 --forward tcp:11080:1080
 vphone-launchpad-cli vm launch corp-test
-# 在新 guest 安装飞连、完成公司登录并连接。
+# 核对副本已有的飞连与设备认证；不重新注册为新设备。
 vphone-launchpad-cli guest rpc corp-test network.socks5.set '{"port":1080}'
 vphone-launchpad-cli guest rpc corp-test network.socks5.get
 ```
@@ -71,6 +71,6 @@ Surge 等需要 UDP 的客户端优先直连 `192.168.64.249:1080`。UDP ASSOCIA
 
 ## 其他验收与合入条件
 
-新 VM 必须完成启动、guest ping、飞连登录、公司网络访问、应用安装/重新安装、剪贴板、软键盘、摇一摇、长时间运行和重启。查看日志是否出现旧的 VideoToolbox `-19093` / VM stopped unexpectedly。新固件的摇一摇尚未实际验证；没有可注入的前台用户 app 时它会报告错误。
+导入旧 VM 的副本必须完成启动、设备身份比对、guest ping、既有飞连认证、公司网络访问、应用管理、剪贴板、软键盘、摇一摇、长时间运行和重启。查看日志是否出现旧的 VideoToolbox `-19093` / VM stopped unexpectedly。新固件的摇一摇尚未实际验证；没有可注入的前台用户 app 时它会报告错误。
 
 通过以上验收后，才合入 `develop` 并移除旧安装与旧数据。旧 Manager 的源码已经删除，当前正在使用的已安装 Manager 保留到切换成功。
