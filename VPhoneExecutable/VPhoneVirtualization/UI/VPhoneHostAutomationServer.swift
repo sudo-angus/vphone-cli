@@ -32,6 +32,14 @@ import VPhoneCoreKit
 ///                                                 window, through `VPhoneApplication` and the virtual
 ///                                                 keyboard (windowed launches only)
 ///   {"t":"type","text":"Hello"}                 → set guest clipboard
+///   {"t":"app_launch","bundle_id":"com.apple.Preferences"} → legacy alias for apps.launch
+///   {"t":"app_list","filter":"running"}          → legacy alias, with apps at the response top level
+///   {"t":"app_terminate","bundle_id":"…"}        → legacy alias for apps.terminate
+///   {"t":"app_uninstall","bundle_id":"…"}        → confirmed uninstall, like the original command
+///   {"t":"ipa_install","path":"/abs/app.ipa"}    → upload a host IPA, then install it in the guest
+///   {"t":"open_url","url":"https://example.com"} → legacy alias for apps.open_url
+///   {"t":"clipboard_set","text":"Hello"}        → legacy alias for clipboard.set
+///   {"t":"clipboard_get"}                       → legacy alias for clipboard.get
 ///   {"t":"ping"}                                → vphoned request/response
 ///   {"t":"rpc","method":"input.type","params":{"text":"ls\n"}}
 ///                                               → any vphoned method; its result is in `"result"`.
@@ -50,11 +58,13 @@ class VPhoneHostAutomationServer {
     private enum HostControlError: Error, CustomStringConvertible {
         case guestNotConnected
         case guestTouchUnavailable
+        case invalidScreenshot
 
         var description: String {
             switch self {
             case .guestNotConnected: "guest not connected"
             case .guestTouchUnavailable: "no VM window, and the guest does not support touch input"
+            case .invalidScreenshot: "invalid guest screenshot"
             }
         }
     }
@@ -189,17 +199,14 @@ class VPhoneHostAutomationServer {
                 return Self.reply(ok: true)
 
             case "screenshot":
-                let image = try await connectedControl().screenshotJPEG()
-                let url = if let outputPath = json["path"] as? String {
-                    try screenRecorder.saveScreenshot(jpegData: image, to: URL(fileURLWithPath: outputPath))
-                } else {
-                    try screenRecorder.saveScreenshot(jpegData: image)
-                }
+                let image = try await captureScreenImage()
+                let outputURL = (json["path"] as? String).map { URL(fileURLWithPath: $0) }
+                let url = try screenRecorder.saveScreenshot(image: image, to: outputURL)
                 // Always include compact image for screenshot command, from the same capture
-                let compact = CGImageSourceCreateWithData(image as CFData, nil)
-                    .flatMap { CGImageSourceCreateImageAtIndex($0, 0, nil) }
-                    .flatMap(compactJPEG)
-                return Self.reply(ok: true, path: url.path, image: compact)
+                return Self.reply(ok: true, path: url.path, image: compactJPEG(image), fields: [
+                    "width": image.width, "height": image.height,
+                    "format": url.pathExtension.lowercased() == "png" ? "png" : "jpeg",
+                ])
 
             case "tap":
                 guard let x = json["x"] as? Double, let y = json["y"] as? Double else {
@@ -233,14 +240,60 @@ class VPhoneHostAutomationServer {
                 }
                 try await VPhoneHostKeyEvents.press(keys, in: view)
 
-            case "type":
+            case "type", "clipboard_set":
                 guard let text = json["text"] as? String else {
-                    return Self.reply(ok: false, error: "type requires text")
+                    return Self.reply(ok: false, error: "\(type) requires text")
                 }
-                try await connectedControl().clipboardSet(text: text)
+                _ = try await connectedControl().rpcAfterQueuedInput("clipboard.set", params: ["text": text])
                 // Not a copy the user made, so leaving the window does not
                 // put it on the Mac clipboard.
                 captureView?.clipboardSync?.adoptGuestClipboard()
+
+            case "app_launch", "app_terminate", "app_uninstall", "app_list", "open_url", "clipboard_get":
+                let method: String
+                var params: [String: Any] = [:]
+                switch type {
+                case "app_launch", "app_terminate", "app_uninstall":
+                    guard let id = json["bundle_id"] as? String, !id.isEmpty else {
+                        return Self.reply(ok: false, error: "\(type) requires bundle_id")
+                    }
+                    params["bundle_id"] = id
+                    if type == "app_launch" {
+                        method = "apps.launch"
+                        params["url"] = json["url"] as? String
+                    } else if type == "app_terminate" {
+                        method = "apps.terminate"
+                    } else {
+                        method = "apps.uninstall"
+                        // The old command itself requested removal, before
+                        // vphoned introduced a separate force parameter.
+                        params["force"] = true
+                    }
+                case "app_list":
+                    method = "apps.list"
+                    params["filter"] = json["filter"] as? String ?? "all"
+                case "open_url":
+                    guard let url = json["url"] as? String, !url.isEmpty else {
+                        return Self.reply(ok: false, error: "open_url requires url")
+                    }
+                    method = "apps.open_url"
+                    params["url"] = url
+                    params["bundle_id"] = json["bundle_id"] as? String
+                default:
+                    method = "clipboard.get"
+                }
+                let result = try await connectedControl().rpcAfterQueuedInput(method, params: params)
+                let image = wantScreen ? await settledCompactScreenshot(delayMs: screenDelay) : nil
+                // Older clients read apps/pid/text directly, not under result.
+                return Self.reply(ok: true, image: image, fields: result)
+
+            case "ipa_install":
+                guard let path = json["path"] as? String, !path.isEmpty else {
+                    return Self.reply(ok: false, error: "ipa_install requires path (a host IPA)")
+                }
+                let result = try await connectedControl().installIPAResult(localURL: URL(fileURLWithPath: path))
+                let image = wantScreen ? await settledCompactScreenshot(delayMs: screenDelay) : nil
+                return Self.reply(ok: true, image: image, fields: result)
 
             case "rpc":
                 guard let method = json["method"] as? String, !method.isEmpty else {
@@ -249,13 +302,7 @@ class VPhoneHostAutomationServer {
                 guard let params = (json["params"] ?? [String: Any]()) as? [String: Any] else {
                     return Self.reply(ok: false, error: "rpc params must be an object")
                 }
-                let result: [String: Any]
-                do {
-                    result = try await connectedControl().rpcAfterQueuedInput(method, params: params)
-                } catch let failure as VPhoneGuestControl.GuestRPCFailure {
-                    // `error` stays the message older clients read.
-                    return Self.reply(ok: false, error: failure.message, guestError: failure.body)
-                }
+                let result = try await connectedControl().rpcAfterQueuedInput(method, params: params)
                 let wantRPCScreen = json["screen"] as? Bool ?? false
                 let image = wantRPCScreen ? await settledCompactScreenshot(delayMs: screenDelay) : nil
                 return Self.reply(ok: true, image: image, result: result)
@@ -275,6 +322,9 @@ class VPhoneHostAutomationServer {
             default:
                 return Self.reply(ok: false, error: "unknown command: \(type)")
             }
+        } catch let failure as VPhoneGuestControl.GuestRPCFailure {
+            // `error` stays the message older clients read.
+            return Self.reply(ok: false, error: failure.message, guestError: failure.body)
         } catch {
             return Self.reply(ok: false, error: "\(error)")
         }
@@ -382,13 +432,13 @@ class VPhoneHostAutomationServer {
 
     /// Capture current screen as a small color JPEG, returned as base64.
     private func captureCompactScreenshot() async -> String? {
-        guard let cgImage = await captureScreenImage() else { return nil }
+        guard let cgImage = try? await captureScreenImage() else { return nil }
         return compactJPEG(cgImage)
     }
 
     private func compactJPEG(_ cgImage: CGImage) -> String? {
-        let dstW = cgImage.width / Self.compactScale
-        let dstH = cgImage.height / Self.compactScale
+        let dstW = max(1, cgImage.width / Self.compactScale)
+        let dstH = max(1, cgImage.height / Self.compactScale)
 
         // Draw into an sRGB context; JPEG has no alpha, so none is kept
         guard let sRGB = CGColorSpace(name: CGColorSpace.sRGB),
@@ -422,15 +472,15 @@ class VPhoneHostAutomationServer {
     }
 
     /// The display capture with a window; the guest's own screenshot headless.
-    private func captureScreenImage() async -> CGImage? {
+    private func captureScreenImage() async throws -> CGImage {
         if let view = windowedView {
-            return try? await screenRecorder.captureStillImage(from: view)
+            return try await screenRecorder.captureStillImage(from: view)
         }
-        guard let control, control.isConnected,
-              let jpeg = try? await control.screenshotJPEG(),
-              let source = CGImageSourceCreateWithData(jpeg as CFData, nil)
-        else { return nil }
-        return CGImageSourceCreateImageAtIndex(source, 0, nil)
+        let jpeg = try await connectedControl().screenshotJPEG()
+        guard let source = CGImageSourceCreateWithData(jpeg as CFData, nil),
+              let image = CGImageSourceCreateImageAtIndex(source, 0, nil)
+        else { throw HostControlError.invalidScreenshot }
+        return image
     }
 
     // MARK: - Accept Loop
@@ -511,8 +561,10 @@ class VPhoneHostAutomationServer {
         image: String? = nil,
         result: [String: Any]? = nil,
         guestError: [String: Any]? = nil,
+        fields: [String: Any] = [:],
     ) -> Data {
-        var dict: [String: Any] = ["ok": ok]
+        var dict = fields
+        dict["ok"] = ok
         if let result {
             dict["result"] = result
         }

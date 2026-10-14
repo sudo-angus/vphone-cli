@@ -1,4 +1,11 @@
 # Patch Comparison: Regular / Development / Jailbreak / Experimental
+> **Poke host compatibility (2026-10-14):** legacy automation commands on
+> `vphone.sock` forward through the current guest RPC/1337 adapter. Windowed
+> screenshots save the host display's full frame. This changes host source
+> only; no kernel, boot-chain, DSC patch, patch set or preset is changed, and
+> the authenticated legacy guest remains untouched. See
+> [implementation and validation status](../poke-vphone-compatibility.md).
+
 > **Local upstream migration (2026-10-13):** branch `codex/upstream-v2-migration`
 > adopts upstream `35d8e8f2` and its complete patch catalogue and presets.
 > No local kernel, boot-chain or DSC patch is added or retargeted. The former

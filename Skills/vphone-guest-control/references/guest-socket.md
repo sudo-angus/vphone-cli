@@ -35,10 +35,36 @@ not there yet.
 
 Unknown `t`, or missing fields, give `{"ok":false,"error":"…"}`.
 
+### Legacy automation clients
+
+The host also accepts `app_launch`, `app_terminate`, `app_uninstall`,
+`app_list`, `open_url`, `clipboard_set` and `clipboard_get`. They use the same
+guest RPC adapter as `rpc`, including the preserved VSOCK-1337 guest.
+`app_launch` takes `bundle_id` and an optional `url`; `app_list` takes `filter`
+(default `all`); `open_url` takes `url` and an optional `bundle_id`.
+`clipboard_set` takes `text`, including an empty string. Application removal
+through `app_uninstall` is itself the confirmation to uninstall.
+
+These aliases return guest fields at the **top level**: `apps`, `pid`, `text`,
+etc. `rpc` continues to return them under `result`. Use `screen:false` for
+queries or commands that do not need an attached compact screenshot.
+`ipa_install` takes a **host** IPA `path`, uploads it, and returns the guest's
+installation details, including `bundle_id` when available. It uses the
+daemon's installer; it does not test the installd path described in
+[rpc-methods](rpc-methods.md#installing-an-app).
+
 ## Replies and the attached screen
 
 Success is `{"ok":true}`, with `result` for `rpc`, `path` for `screenshot`, and
 `image` when a screen is attached. Failure is `{"ok":false,"error":"…"}`.
+Guest RPC refusals also include the guest's structured `guest_error`.
+
+`screenshot` captures the full VM display when a window exists; it does not
+require the legacy guest to implement `screen.screenshot`. Headless launches
+use the guest screenshot operation and fail explicitly when it is unsupported.
+The saved file retains the captured frame's native dimensions. The response
+reports `width`, `height` and `format` for that file, and its compact `image`
+is generated from the same frame.
 
 - `image` is a **small color JPEG, base64**: the screen at a third of its
   size and low quality, meant for a quick "did something change" glance. It is

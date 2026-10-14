@@ -527,13 +527,18 @@ final class VPhoneGuestControl {
     }
 
     func installIPA(localURL: URL) async throws -> String {
+        let result = try await installIPAResult(localURL: localURL)
+        return result["msg"] as? String ?? "Installed \(localURL.lastPathComponent)."
+    }
+
+    /// Keep the guest's bundle_id and installation details for automation.
+    func installIPAResult(localURL: URL) async throws -> [String: Any] {
         let data = try Data(contentsOf: localURL, options: .mappedIfSafe)
         let path = "/var/mobile/Documents/vphone-installs/\(UUID().uuidString)-\(localURL.lastPathComponent)"
         try await createDirectory(path: "/var/mobile/Documents/vphone-installs")
         try await uploadFile(path: path, data: data)
         defer { Task { try? await deleteFile(path: path) } }
-        let result = try await call("apps.install", params: ["path": path, "registration": "User"])
-        return result["msg"] as? String ?? "Installed \(localURL.lastPathComponent)."
+        return try await rpcAfterQueuedInput("apps.install", params: ["path": path, "registration": "User"])
     }
 
     /// Where the Files app shows a dropped file: On My iPhone › vphone-drop.

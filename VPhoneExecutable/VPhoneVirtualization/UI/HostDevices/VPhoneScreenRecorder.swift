@@ -155,6 +155,21 @@ class VPhoneScreenRecorder {
         return url
     }
 
+    /// Encodes the full display frame directly; the automation thumbnail is
+    /// generated separately and never used as the saved screenshot.
+    func saveScreenshot(image: CGImage, to outputURL: URL? = nil) throws -> URL {
+        let url = outputURL ?? screenshotOutputURL()
+        let isPNG = url.pathExtension.lowercased() == "png"
+        guard let destination = CGImageDestinationCreateWithURL(
+            url as CFURL, (isPNG ? "public.png" : "public.jpeg") as CFString, 1, nil,
+        ) else { throw CaptureError.encodingFailed }
+        let options: [CFString: Any] = isPNG ? [:] : [kCGImageDestinationLossyCompressionQuality: 0.9]
+        CGImageDestinationAddImage(destination, image, options as CFDictionary)
+        guard CGImageDestinationFinalize(destination) else { throw CaptureError.encodingFailed }
+        print("[record] screenshot saved - \(url.path)")
+        return url
+    }
+
     // MARK: - Frame Capture
 
     private func captureFrame() {

@@ -62,14 +62,22 @@ final class VPhoneLegacyGuestControl {
         do { reply = try await connect(device).exchange(data, payload: payload) }
         catch { stop(); throw error }
         hello = try JSONSerialization.jsonObject(with: reply.hello) as? [String: Any] ?? [:]
-        guard var value = try JSONSerialization.jsonObject(with: reply.json) as? [String: Any] else {
+        return (try Self.decodeReply(reply.json), reply.binary)
+    }
+
+    static func decodeReply(_ data: Data) throws -> [String: Any] {
+        guard var value = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw VPhoneGuestControl.ControlError.protocolError("invalid legacy JSON")
         }
-        if value["t"] as? String == "err" {
-            throw VPhoneGuestControl.GuestRPCFailure(body: ["code": "legacy_guest_error", "message": value["msg"] as? String ?? "Legacy guest refused operation"])
+        if value["t"] as? String == "err" || value["ok"] as? Bool == false {
+            var error = value
+            error["code"] = value["code"] ?? "legacy_guest_error"
+            error["message"] = value["error"] as? String ?? value["msg"] as? String
+                ?? value["message"] as? String ?? "Legacy guest refused operation"
+            throw VPhoneGuestControl.GuestRPCFailure(body: error)
         }
         value["ok"] = value["ok"] ?? true
-        return (value, reply.binary)
+        return value
     }
 
     func health(device: VZVirtioSocketDevice) async throws -> [String: Any] {
